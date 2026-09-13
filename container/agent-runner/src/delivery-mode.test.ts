@@ -1058,6 +1058,58 @@ describe('provider errors', () => {
     expect(userTexts()).toEqual(['already answered']);
   });
 
+  it('notices a queued follow-up when the provider throws after accepting it', async () => {
+    insertChat('m1', 'first question');
+    const controller = new AbortController();
+    const pushes: string[] = [];
+    const provider: AgentProvider = {
+      query: () => {
+        async function* events(): AsyncGenerator<ProviderEvent> {
+          yield { type: 'init', continuation: 's1' };
+          await writeMessageOut({
+            id: 'tool-1',
+            in_reply_to: 'm1',
+            kind: 'chat',
+            platform_id: 'chan-1',
+            channel_type: 'discord',
+            thread_id: null,
+            content: JSON.stringify({ text: 'first answer' }),
+          });
+          insertChat('m2', 'second question', { threadId: 'thread-2' });
+          const deadline = Date.now() + 3000;
+          while (!pushes.some((text) => text.includes('second question')) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          if (!pushes.some((text) => text.includes('second question'))) {
+            throw new Error('follow-up was not pushed before the test deadline');
+          }
+          throw new Error('provider failed after accepting the follow-up');
+        }
+        return {
+          push: (text) => pushes.push(text),
+          end: () => {},
+          events: events(),
+          abort: () => {},
+        };
+      },
+      isSessionInvalid: () => false,
+    };
+    setTimeout(() => controller.abort(), 1000);
+
+    await runPollLoop({
+      provider,
+      providerName: 'mock',
+      cwd: '/workspace/agent',
+      deliveryMode: 'tools-only',
+      signal: controller.signal,
+    });
+
+    const rows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(rows.map((row) => JSON.parse(row.content).text)).toEqual(['first answer', TOOLS_ONLY_ERROR_NOTICE]);
+    expect(rows.map((row) => row.in_reply_to)).toEqual(['m1', 'm2']);
+    expect(rows.map((row) => row.thread_id)).toEqual([null, 'thread-2']);
+  });
+
   it('never forwards the provider error text, and says something instead', async () => {
     const leaky = 'Upstream said: <internal>key sk-live-abc</internal> <call:retry()</call:retry>';
     const { query, pushes } = makeQuery({

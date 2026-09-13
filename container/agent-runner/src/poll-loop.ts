@@ -60,6 +60,24 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Preserve the live tools-only obligations on the original provider error.
+ * A WeakMap keeps the provider's error identity intact for isSessionInvalid()
+ * while letting the outer loop notify follow-ups that processQuery accepted
+ * after the opening batch.
+ */
+const toolsOnlyFailureTargets = new WeakMap<object, ReplyTarget[]>();
+
+function rememberToolsOnlyFailure(error: unknown, targets: ReplyTarget[]): unknown {
+  if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
+    toolsOnlyFailureTargets.set(error as object, targets);
+    return error;
+  }
+  const wrapped = new Error(String(error));
+  toolsOnlyFailureTargets.set(wrapped, targets);
+  return wrapped;
+}
+
 export interface PollLoopConfig {
   provider: AgentProvider;
   /** Declared provider runtime behavior. Contractless providers keep legacy defaults. */
@@ -316,21 +334,24 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
       if ((config.deliveryMode ?? 'envelope') === 'tools-only') {
         // A provider can throw before it emits a result event (native server
-        // setup/prompt failures are one real path). That bypasses
-        // processQuery's error-result handling, but it must preserve the same
-        // tools-only contract: raw diagnostics stay in the log, a person who
-        // is still waiting gets the fixed notice, and a successful tool send
-        // earlier in the turn is not followed by a duplicate error.
-        const outstanding = (routing.replyTargets ?? []).map((target) => ({
-          target,
-          nudged: false,
-          exchange: 0,
-        }));
-        settleDeliveries(outstanding, new Map(), getDeliveriesSince(outerTurnStartSeq).deliveries, 0);
-        await handleToolsOnlyError(
-          errMsg,
-          outstanding.flatMap((entry) => (entry.target ? [entry.target] : [])),
-        );
+        // setup/prompt failures are one real path). processQuery records its
+        // live obligations before rethrowing so a follow-up accepted while the
+        // stream was open is not lost. Errors thrown before that accounting is
+        // initialized retain the opening-batch fallback.
+        let targets =
+          (typeof err === 'object' && err !== null) || typeof err === 'function'
+            ? toolsOnlyFailureTargets.get(err as object)
+            : undefined;
+        if (targets === undefined) {
+          const opening = (routing.replyTargets ?? []).map((target) => ({
+            target,
+            nudged: false,
+            exchange: 0,
+          }));
+          settleDeliveries(opening, new Map(), getDeliveriesSince(outerTurnStartSeq).deliveries, 0);
+          targets = opening.flatMap((entry) => (entry.target ? [entry.target] : []));
+        }
+        await handleToolsOnlyError(errMsg, targets);
       } else {
         // Preserve the existing envelope-mode error behavior.
         await writeMessageOut({
@@ -1033,6 +1054,17 @@ export async function processQuery(
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
     });
+    if (toolsOnly) {
+      // A thrown provider error ends the whole stream, including prompts that
+      // were already pushed but had not reached their own result. Settle any
+      // sends from the active exchange, then hand every remaining human
+      // obligation to runPollLoop for one masked notice per address.
+      settle(resultsSeen);
+      throw rememberToolsOnlyFailure(
+        err,
+        outstanding.flatMap((entry) => (entry.target ? [entry.target] : [])),
+      );
+    }
     throw err;
   } finally {
     done = true;
