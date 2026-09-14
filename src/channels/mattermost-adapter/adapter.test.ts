@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import { createHmac } from 'node:crypto';
+import { WebSocketServer } from 'ws';
 import type { ChatInstance } from 'chat';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -133,5 +136,92 @@ describe('Mattermost action callbacks', () => {
       'Mattermost action callback: could not recover posting thread',
       expect.objectContaining({ postId: POST_ID }),
     );
+  });
+});
+
+describe('Mattermost runtime verification contract', () => {
+  it('proves live credentials and settings only after socket authentication, and clears readiness on disconnect', async () => {
+    const token = 'test-bot-token';
+    const secret = 'test-callback-secret';
+    const server = createServer((req, res) => {
+      expect(req.headers.authorization).toBe(`Bearer ${token}`);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ id: BOT_ID, username: 'test-bot', is_bot: true }));
+    });
+    const sockets = new WebSocketServer({ server });
+    let authenticate: (() => void) | undefined;
+    sockets.on('connection', (socket) =>
+      socket.on('message', (raw) => {
+        const message = JSON.parse(raw.toString());
+        expect(message.data.token).toBe(token);
+        authenticate = () => socket.send(JSON.stringify({ status: 'OK', seq_reply: message.seq }));
+      }),
+    );
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing listener');
+    const base = `http://127.0.0.1:${address.port}`;
+    const adapter = new MattermostAdapter({
+      url: base,
+      token,
+      callbackSecret: secret,
+      callbackUrl: 'https://callback.test',
+    });
+    const processAction = vi.fn();
+    const logger = { debug() {}, error() {}, info() {}, warn() {} };
+    try {
+      expect(adapter.isConnected()).toBe(false);
+      const init = adapter.initialize({ getLogger: () => logger, processAction } as unknown as ChatInstance);
+      await vi.waitFor(() => expect(authenticate).toBeDefined());
+      expect(adapter.isConnected()).toBe(false);
+      authenticate!();
+      await init;
+      expect(adapter.isConnected()).toBe(true);
+      const challenge = '12345678-1234-1234-1234-123456789abc';
+      const probe = (credential?: string) =>
+        new Request('http://localhost/webhook/mattermost', {
+          method: 'POST',
+          body: JSON.stringify({ context: { nanoclaw_setup_probe: challenge, callback_token: credential } }),
+        });
+      expect((await adapter.handleWebhook(probe())).status).toBe(401);
+      expect((await adapter.handleWebhook(probe('wrong'))).status).toBe(401);
+      const runtime = {
+        challenge,
+        bot_id: BOT_ID,
+        base_url: base,
+        callback_url: 'https://callback.test/webhook/mattermost',
+        connected: true,
+        callback_received: false,
+      };
+      const response = await adapter.handleWebhook(probe(secret));
+      expect(await response.json()).toEqual({
+        ...runtime,
+        proof: createHmac('sha256', token).update(JSON.stringify(runtime)).digest('hex'),
+      });
+      const action = (proof: string) =>
+        new Request('http://localhost/webhook/mattermost', {
+          method: 'POST',
+          body: JSON.stringify({ context: { nanoclaw_setup_action: challenge, nanoclaw_setup_proof: proof } }),
+        });
+      expect((await adapter.handleWebhook(action('x'.repeat(64)))).status).toBe(401);
+      expect(
+        (
+          await adapter.handleWebhook(
+            action(createHmac('sha256', token).update(`nanoclaw-setup:${challenge}`).digest('hex')),
+          )
+        ).status,
+      ).toBe(200);
+      expect(await (await adapter.handleWebhook(probe(secret))).json()).toMatchObject({ callback_received: true });
+      expect(processAction).not.toHaveBeenCalled();
+      for (const socket of sockets.clients) socket.terminate();
+      await vi.waitFor(() => expect(adapter.isConnected()).toBe(false));
+      await adapter.disconnect();
+      expect(adapter.isConnected()).toBe(false);
+    } finally {
+      await adapter.disconnect();
+      for (const socket of sockets.clients) socket.terminate();
+      await new Promise<void>((done) => sockets.close(() => done()));
+      await new Promise<void>((done) => server.close(() => done()));
+    }
   });
 });

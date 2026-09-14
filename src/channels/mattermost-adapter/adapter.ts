@@ -14,6 +14,8 @@
  * `handleSocketEvent`).
  */
 
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
 import { ConsoleLogger, defaultEmojiResolver, Message } from 'chat';
 import type {
   ActionEvent,
@@ -220,6 +222,7 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
 
   readonly rest: MattermostRestClient;
 
+  private readonly setupCallbacks = new Set<string>();
   private readonly callbackSecret: string | undefined;
   private readonly callbackUrl: string | undefined;
   /**
@@ -308,6 +311,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       token: this.options.token,
     });
     await this.socket.connect();
+  }
+
+  /** True only while the socket is open and authenticated. */
+  isConnected(): boolean {
+    return this.socket?.connected === true;
   }
 
   async disconnect(): Promise<void> {
@@ -934,6 +942,24 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       return new Response('Invalid JSON', { status: 400 });
     }
 
+    // A setup action uses a one-purpose proof, not the long-lived callback
+    // secret: a mistyped callback destination cannot receive that secret.
+    const setupNonce = payload.context?.nanoclaw_setup_action;
+    if (typeof setupNonce === 'string' && /^[a-f0-9-]{36}$/.test(setupNonce)) {
+      const presented = payload.context?.nanoclaw_setup_proof;
+      const expected = createHmac('sha256', this.options.token).update(`nanoclaw-setup:${setupNonce}`).digest('hex');
+      if (
+        typeof presented !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(presented) ||
+        !timingSafeEqual(Buffer.from(presented), Buffer.from(expected))
+      ) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      this.setupCallbacks.add(setupNonce);
+      if (this.setupCallbacks.size > 32) this.setupCallbacks.delete(this.setupCallbacks.values().next().value!);
+      return Response.json({});
+    }
+
     if (this.callbackSecret !== undefined) {
       const presented = payload.context?.[CALLBACK_SECRET_KEY];
       if (presented !== this.callbackSecret) {
@@ -943,6 +969,23 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
         });
         return new Response('Unauthorized', { status: 401 });
       }
+    }
+
+    // A setup challenge checks this initialized adapter without delivering an
+    // action or posting a message. Authenticate before exposing runtime values.
+    const challenge = payload.context?.nanoclaw_setup_probe;
+    if (typeof challenge === 'string' && /^[a-f0-9-]{36}$/.test(challenge)) {
+      if (!this.callbackSecret) return new Response('Unauthorized', { status: 401 });
+      const runtime = {
+        challenge,
+        bot_id: this.botUserId,
+        base_url: this.options.url,
+        callback_url: this.actionCallbackUrl(),
+        connected: this.isConnected(),
+        callback_received: this.setupCallbacks.has(challenge),
+      };
+      const proof = createHmac('sha256', this.options.token).update(JSON.stringify(runtime)).digest('hex');
+      return Response.json({ ...runtime, proof });
     }
 
     const event = this.toActionEvent(payload);
