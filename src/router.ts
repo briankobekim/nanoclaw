@@ -35,7 +35,7 @@ import { resolveSession, writeSessionMessage, writeOutboundDirect } from './sess
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
-import type { InboundEvent } from './channels/adapter.js';
+import type { InboundDeliveryReceipt, InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -213,12 +213,17 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * Creates messaging group + session if they don't exist yet.
  */
 export async function routeInbound(event: InboundEvent): Promise<void> {
+  await routeInboundWithReceipt(event);
+}
+
+/** Host-facing variant that proves which agent sessions durably received the message. */
+export async function routeInboundWithReceipt(event: InboundEvent): Promise<InboundDeliveryReceipt> {
   // Pre-route interceptors — let modules consume messages before any routing
   // (e.g. free-text DM replies during multi-step approval flows). They run in
   // registration order; the first to claim the message stops routing. The
   // sequential await is intentional — first-to-claim is order-dependent.
   for (const intercept of messageInterceptors) {
-    if (await intercept(event)) return;
+    if (await intercept(event)) return { deliveredAgentGroupIds: [] };
   }
 
   // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
@@ -250,7 +255,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // No messaging_groups row. Auto-create only when the message warrants
     // attention (the bot was addressed — @mention or DM). Plain chatter in
     // channels we merely sit in stays silent — no row, no DB writes.
-    if (!isMention) return;
+    if (!isMention) return { deliveredAgentGroupIds: [] };
     const mgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     mg = {
       id: mgId,
@@ -297,13 +302,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
-    if (!isMention) return;
+    if (!isMention) return { deliveredAgentGroupIds: [] };
     if (mg.denied_at) {
       log.debug('Message dropped — channel was denied by owner', {
         messagingGroupId: mg.id,
         deniedAt: mg.denied_at,
       });
-      return;
+      return { deliveredAgentGroupIds: [] };
     }
 
     const parsed = safeParseContent(event.message.content);
@@ -332,7 +337,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         platformId: event.platformId,
       });
     }
-    return;
+    return { deliveredAgentGroupIds: [] };
   }
 
   // 2. Sender resolution (permissions module upserts the users row as a
@@ -370,6 +375,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
+  const deliveredAgentGroupIds: string[] = [];
 
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
@@ -396,8 +402,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
-      engagedCount++;
+      if (await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true)) {
+        engagedCount++;
+        deliveredAgentGroupIds.push(agent.agent_group_id);
+      }
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
       // platform's subscribed-message path carries follow-ups without
@@ -428,8 +436,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
-      accumulatedCount++;
+      if (await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false)) {
+        accumulatedCount++;
+        deliveredAgentGroupIds.push(agent.agent_group_id);
+      }
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
         agentGroupId: agent.agent_group_id,
@@ -452,6 +462,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       agent_group_id: null,
     });
   }
+  return { deliveredAgentGroupIds };
 }
 
 /**
@@ -523,7 +534,7 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
-): Promise<void> {
+): Promise<boolean> {
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
   // wiring in a group chat → per-thread session regardless of wiring
@@ -561,7 +572,7 @@ async function deliverToAgent(
     const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
       log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
-      return;
+      return false;
     }
     if (gate.action === 'deny') {
       await writeOutboundDirect(session.agent_group_id, session.id, {
@@ -573,7 +584,7 @@ async function deliverToAgent(
         content: JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
       });
       log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
-      return;
+      return false;
     }
   }
 
@@ -663,6 +674,7 @@ async function deliverToAgent(
       if (!woke) stopTypingRefresh(freshSession.id);
     }
   }
+  return true;
 }
 
 /**

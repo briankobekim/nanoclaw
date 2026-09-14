@@ -408,7 +408,7 @@ describe('router', () => {
   });
 
   it('should route a message end-to-end', async () => {
-    const { routeInbound } = await import('./router.js');
+    const { routeInboundWithReceipt } = await import('./router.js');
     const { wakeContainer } = await import('./container-runner.js');
 
     const event: InboundEvent = {
@@ -423,7 +423,8 @@ describe('router', () => {
       },
     };
 
-    await routeInbound(event);
+    const receipt = await routeInboundWithReceipt(event);
+    expect(receipt).toEqual({ deliveredAgentGroupIds: ['ag-1'] });
 
     // Verify session was created
     const session = await findSession('mg-1', null);
@@ -447,11 +448,11 @@ describe('router', () => {
     // unknown channel stays silent (no DB writes) so a bot that sits in
     // many unwired channels doesn't bloat messaging_groups. Only explicit
     // mentions and DMs trigger auto-create.
-    const { routeInbound } = await import('./router.js');
+    const { routeInboundWithReceipt } = await import('./router.js');
     const { getMessagingGroupByPlatform } = await import('./db/messaging-groups.js');
 
     // Plain message on unknown channel — should NOT auto-create.
-    await routeInbound({
+    const plainReceipt = await routeInboundWithReceipt({
       channelType: 'slack',
       platformId: 'C-PLAIN',
       threadId: null,
@@ -462,10 +463,11 @@ describe('router', () => {
         timestamp: now(),
       },
     });
+    expect(plainReceipt).toEqual({ deliveredAgentGroupIds: [] });
     expect(await getMessagingGroupByPlatform('slack', 'C-PLAIN')).toBeUndefined();
 
     // Mention on unknown channel — SHOULD auto-create (next step: channel-registration flow).
-    await routeInbound({
+    const unwiredReceipt = await routeInboundWithReceipt({
       channelType: 'slack',
       platformId: 'C-MENTIONED',
       threadId: null,
@@ -477,6 +479,7 @@ describe('router', () => {
         isMention: true,
       },
     });
+    expect(unwiredReceipt).toEqual({ deliveredAgentGroupIds: [] });
     expect(await getMessagingGroupByPlatform('slack', 'C-MENTIONED')).toBeDefined();
   });
 

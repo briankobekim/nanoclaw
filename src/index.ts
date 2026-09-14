@@ -15,7 +15,7 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
-import { routeInbound } from './router.js';
+import { routeInbound, routeInboundWithReceipt } from './router.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
 
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
-        routeInbound({
+        return routeInboundWithReceipt({
           channelType: adapter.channelType,
           // The one host-side stamping seam: adapters stay instance-blind,
           // the host stamps the receiving instance on every inbound event.
@@ -107,6 +107,7 @@ async function main(): Promise<void> {
           },
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
+          throw err;
         });
       },
       onInboundEvent(event) {

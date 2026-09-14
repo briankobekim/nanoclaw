@@ -8,7 +8,11 @@
 /** Passed to the adapter at setup time. */
 export interface ChannelSetup {
   /** Called when an inbound message arrives from the platform. */
-  onInbound(platformId: string, threadId: string | null, message: InboundMessage): void | Promise<void>;
+  onInbound(
+    platformId: string,
+    threadId: string | null,
+    message: InboundMessage,
+  ): void | InboundDeliveryReceipt | Promise<void | InboundDeliveryReceipt>;
 
   /**
    * Called by admin-transport adapters (CLI) that want to route a message to
@@ -23,6 +27,11 @@ export interface ChannelSetup {
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
   onAction(questionId: string, selectedOption: string, userId: string): void;
+}
+
+/** Durable recipients reached by one host routing attempt. */
+export interface InboundDeliveryReceipt {
+  deliveredAgentGroupIds: string[];
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

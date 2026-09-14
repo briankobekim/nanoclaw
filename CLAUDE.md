@@ -113,6 +113,8 @@ ncl help
 | destinations | list, add, remove | Where an agent group can send messages |
 | sessions | list, get | Active sessions (read-only) |
 | tasks | list, get, create, update, cancel, pause, resume, delete, run, append-log | Scheduled tasks for an agent group |
+| handoffs | list, get, events, create, deliver, review, acknowledge, close | Trusted handoff records and their append-only transition history |
+| missions | list | Read-only mission view derived from tasks and handoffs |
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |
 | approvals | list, get | Pending approval requests (read-only) |
@@ -302,6 +304,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/skill-directives.md](docs/skill-directives.md) | `nc:` directive reference: fence grammar, the eight kinds, effects, guards, lint |
 | [docs/skill-engine-seam.md](docs/skill-engine-seam.md) | Skill-engine consumer contract (wizard / pipeline / agent-relay) + boundary-rule rationale |
 | [docs/templates.md](docs/templates.md) | Agent templates: what they are, stamping via `ncl groups create --template` + the setup wizard, the OneCLI/MCP-credential model, supported providers, and how to contribute one |
+| [docs/handoff-mission-control.md](docs/handoff-mission-control.md) | Durable handoffs, Slack delivery enforcement, and the derived `ncl missions list` view |
 | [docs/hardened-image.md](docs/hardened-image.md) | Opt-in: pull the agent image from a registry instead of building it |
 
 ## Container Build Cache
