@@ -66,6 +66,13 @@ When refreshing an older installation, remove its unused
 Recreate affected containers after the refresh to discard their old config
 symlinks. Keep other tools' settings and persisted session data.
 
+The obsolete host Dockerfile guard must also be removed during refresh; current
+OpenCode installation is declared by the SDK and CLI manifests.
+
+```nc:run effect:refresh when:opencode_core_ready=yes
+rm -f src/opencode-dockerfile.test.ts
+```
+
 ```nc:copy when:opencode_core_ready=yes
 payload/container/agent-runner/src/provider-contracts/opencode.ts -> container/agent-runner/src/provider-contracts/opencode.ts
 payload/container/agent-runner/src/providers/mcp-to-opencode.test.ts -> container/agent-runner/src/providers/mcp-to-opencode.test.ts
