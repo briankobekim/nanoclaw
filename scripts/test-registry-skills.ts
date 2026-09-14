@@ -28,6 +28,7 @@ import {
   resolveChatCoreVersion,
   validate,
 } from './skill-directives.js';
+import { gitFetchBranchCommand } from './git-fetch-branch.js';
 import { refreshInstalledSkills, resolveRegistryRemote } from './update-skills.js';
 import { verifyProviderContracts } from './provider-contract-verifier.js';
 import { parseProviderDescriptor } from '../setup/providers/skill-descriptor.js';
@@ -331,7 +332,8 @@ async function testSkill(
         if (event.type === 'step-start') current = byLine.get(event.line);
       },
       exec: (cmd) => {
-        if (/^git fetch skill-ci (channels|providers)$/.test(cmd)) return '';
+        // These refs are pinned above; skill-ci is not a network remote here.
+        if ([...REGISTRY_BRANCHES].some((branch) => cmd === gitFetchBranchCommand('skill-ci', branch))) return '';
         const stub = fixture.exec?.find((candidate) => cmd.includes(candidate.match));
         if (stub) return stub.stdout;
         if (current?.kind === 'run' && STUBBED_EFFECTS.has(String(current.attrs.effect))) {

@@ -310,7 +310,7 @@ describe('error and interrupted turns', () => {
     ).rejects.toThrow('SDK stream died');
 
     // The mid-turn write is durable — an interrupted turn cannot claw it back.
-    expect(deliveredTexts()).toEqual(['Sent before the crash.']);
+    expect(deliveredTexts()).toEqual(['Sent before the crash.', 'The agent run failed. Check the logs for details.']);
   });
 });
 

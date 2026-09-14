@@ -15,6 +15,9 @@ Delete `import './opencode.js';` from these four barrels, leaving other imports:
 Delete exactly the skill-owned copied files below. Leave shared registry,
 contract, memory, and cwd-shim files in place.
 
+`src/opencode-dockerfile.test.ts` is the guard the skill installed before the
+`cli-tools.json` migration; it is listed so removal also cleans older installs.
+
 ```bash
 rm -f container/agent-runner/src/provider-contracts/opencode.ts
 rm -f container/agent-runner/src/providers/mcp-to-opencode.test.ts
@@ -48,6 +51,7 @@ rm -f scripts/tsconfig.opencode-auth.json
 rm -f src/provider-contracts/opencode.ts
 rm -f src/providers/opencode-auth-stub.ts
 rm -f src/providers/opencode-registration.test.ts
+rm -f src/opencode-dockerfile.test.ts
 rm -f src/providers/opencode.ts
 ```
 
