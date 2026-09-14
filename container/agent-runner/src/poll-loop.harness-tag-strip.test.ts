@@ -132,3 +132,20 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
     expect(pushes).toHaveLength(0);
   });
 });
+
+it('sanitizes the dedicated provider error field without delivering private result text', async () => {
+  const { query, pushes } = makeResultQuery({
+    type: 'result',
+    text: 'Private raw transport diagnostic',
+    error: 'Please try again later.\n<invoke name="retry"></parameter>',
+    isError: true,
+  });
+
+  await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+  const out = getUndeliveredMessages();
+  expect(out).toHaveLength(1);
+  expect(JSON.parse(out[0].content).text).toBe('Please try again later.');
+  expect(out[0].content).not.toContain('Private raw transport diagnostic');
+  expect(pushes).toHaveLength(0);
+});

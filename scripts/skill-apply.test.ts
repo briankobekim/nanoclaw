@@ -117,7 +117,10 @@ describe('apply engine lifecycle', () => {
     const { cmds, exec } = recordingExec();
     const result = await applySkill(skillDir, root, { exec, resolveRemote: () => 'fixture' });
     expect(fullyApplied(result)).toBe(true);
-    expect(cmds).toEqual(['git fetch fixture providers', 'git show fixture/providers:src/missing.ts > src/missing.ts']);
+    expect(cmds).toHaveLength(2);
+    expect(cmds[0]).toBe("git fetch 'fixture' '+refs/heads/providers:refs/remotes/fixture/providers'");
+    expect(cmds[1]).toContain("git show 'refs/remotes/fixture/providers:src/missing.ts'");
+    expect(cmds[1]).not.toContain('src/sample.ts');
     expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
     expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
   });
@@ -241,13 +244,9 @@ describe('from-branch copy apply path', () => {
     // the redirect target's parent now exists, so the exec'd `git show … > dest`
     // (mocked here) would not fail with ENOENT on a real run
     expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true);
-    expect(cmds).toContain('git fetch origin channels');
+    expect(cmds).toContain("git fetch 'origin' '+refs/heads/channels:refs/remotes/origin/channels'");
     expect(
-      cmds.some((c) =>
-        /^git show origin\/channels:container\/skills\/demo-formatting\/SKILL\.md > container\/skills\/demo-formatting\/SKILL\.md$/.test(
-          c,
-        ),
-      ),
+      cmds.some((c) => c.includes("git show 'refs/remotes/origin/channels:container/skills/demo-formatting/SKILL.md'")),
     ).toBe(true);
     expect(res.journal).toContainEqual({ op: 'wrote', path: 'container/skills/demo-formatting/SKILL.md' });
 
