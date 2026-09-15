@@ -1,0 +1,448 @@
+import { createHash, randomUUID } from 'crypto';
+
+import { getDb } from '../../db/connection.js';
+import {
+  canonicalVerificationInputs,
+  validateVerificationInputs,
+  type VerificationInputs,
+} from '../verifier/checks-schema.js';
+
+export type HandoffStatus =
+  | 'created'
+  | 'delivered'
+  | 'approved'
+  | 'changes_required'
+  | 'review_blocked'
+  | 'acknowledged'
+  | 'closed';
+
+export type ReviewOutcome = 'APPROVED' | 'APPROVED WITH MINOR NOTES' | 'CHANGES REQUIRED' | 'REVIEW BLOCKED';
+
+export interface HandoffRow {
+  id: string;
+  source_agent_group_id: string;
+  reviewer_agent_group_id: string;
+  source_session_id: string | null;
+  project: string;
+  goal: string;
+  outcome: string;
+  scope: string;
+  authority: string;
+  fingerprint: string;
+  status: HandoffStatus;
+  review_outcome: ReviewOutcome | null;
+  review_notes: string | null;
+  closure_evidence: string | null;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+}
+
+export interface HandoffEventRow {
+  id: string;
+  handoff_id: string;
+  sequence: number;
+  event_type: string;
+  actor_agent_group_id: string;
+  payload_json: string;
+  created_at: string;
+}
+
+export interface CreateHandoffInput {
+  id?: string;
+  sourceAgentGroupId: string;
+  reviewerAgentGroupId: string;
+  sourceSessionId?: string | null;
+  project: string;
+  goal: string;
+  outcome: string;
+  scope: string;
+  authority: string;
+}
+
+/**
+ * A handoff id is used as a path segment by the verifier's evidence directory,
+ * so the ledger refuses at creation anything the verifier would refuse at use:
+ * it must start with an alphanumeric and may then use only `[A-Za-z0-9._-]`, to
+ * 64 characters. Same rule in the tool, the host and here.
+ */
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function required(label: string, value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${label} is required`);
+  return trimmed;
+}
+
+function handoffId(value?: string): string {
+  const id = value?.trim() || `handoff-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  // `.` and `..` cannot match the pattern, but they are the two names that
+  // would do real damage as a path segment, so they are also refused by name.
+  if (id === '.' || id === '..' || !ID_PATTERN.test(id)) {
+    throw new Error(
+      'handoff id must start with a letter or digit and use at most 64 characters of letters, digits, dot, underscore, or dash',
+    );
+  }
+  return id;
+}
+
+function canonical(input: {
+  id: string;
+  sourceAgentGroupId: string;
+  reviewerAgentGroupId: string;
+  project: string;
+  goal: string;
+  outcome: string;
+  scope: string;
+  authority: string;
+}): string {
+  return JSON.stringify({
+    id: input.id,
+    source_agent_group_id: input.sourceAgentGroupId,
+    reviewer_agent_group_id: input.reviewerAgentGroupId,
+    project: input.project,
+    goal: input.goal,
+    outcome: input.outcome,
+    scope: input.scope,
+    authority: input.authority,
+  });
+}
+
+export function fingerprintHandoff(input: Parameters<typeof canonical>[0]): string {
+  return createHash('sha256').update(canonical(input)).digest('hex');
+}
+
+async function appendEvent(
+  handoffId: string,
+  eventType: string,
+  actorAgentGroupId: string,
+  payload: Record<string, unknown>,
+  createdAt: string,
+): Promise<void> {
+  const next =
+    (
+      await getDb().get<{ sequence: number }>(
+        'SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM handoff_events WHERE handoff_id = ?',
+        handoffId,
+      )
+    )?.sequence ?? 1;
+  await getDb().run(
+    `INSERT INTO handoff_events
+       (id, handoff_id, sequence, event_type, actor_agent_group_id, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    randomUUID(),
+    handoffId,
+    next,
+    eventType,
+    actorAgentGroupId,
+    JSON.stringify(payload),
+    createdAt,
+  );
+}
+
+export async function getHandoff(id: string): Promise<HandoffRow | undefined> {
+  return getDb().get<HandoffRow>('SELECT * FROM handoffs WHERE id = ?', id);
+}
+
+async function mustGetHandoff(id: string): Promise<HandoffRow> {
+  const row = await getHandoff(id);
+  if (!row) throw new Error(`handoff not found: ${id}`);
+  return row;
+}
+
+function expectFingerprint(row: HandoffRow, fingerprint: string): void {
+  if (row.fingerprint !== fingerprint) {
+    throw new Error(`handoff fingerprint mismatch for ${row.id}`);
+  }
+}
+
+function expectActor(actual: string, expected: string, role: string): void {
+  if (actual !== expected) throw new Error(`only the handoff ${role} may perform this transition`);
+}
+
+function expectStatus(row: HandoffRow, expected: HandoffStatus): void {
+  if (row.status !== expected) {
+    throw new Error(`handoff ${row.id} is ${row.status}; expected ${expected}`);
+  }
+}
+
+export async function createHandoff(input: CreateHandoffInput): Promise<HandoffRow> {
+  const id = handoffId(input.id);
+  const project = required('project', input.project);
+  const goal = required('goal', input.goal);
+  const outcome = required('outcome', input.outcome);
+  const scope = required('scope', input.scope);
+  const authority = required('authority', input.authority);
+  if (input.sourceAgentGroupId === input.reviewerAgentGroupId) {
+    throw new Error('source and reviewer must be different agents');
+  }
+  const fingerprint = fingerprintHandoff({
+    id,
+    sourceAgentGroupId: input.sourceAgentGroupId,
+    reviewerAgentGroupId: input.reviewerAgentGroupId,
+    project,
+    goal,
+    outcome,
+    scope,
+    authority,
+  });
+  const now = new Date().toISOString();
+  await getDb().transaction(async () => {
+    await getDb().run(
+      `INSERT INTO handoffs
+         (id, source_agent_group_id, reviewer_agent_group_id, source_session_id,
+          project, goal, outcome, scope, authority, fingerprint, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?)`,
+      id,
+      input.sourceAgentGroupId,
+      input.reviewerAgentGroupId,
+      input.sourceSessionId ?? null,
+      project,
+      goal,
+      outcome,
+      scope,
+      authority,
+      fingerprint,
+      now,
+      now,
+    );
+    await appendEvent(id, 'created', input.sourceAgentGroupId, { fingerprint, project, goal }, now);
+  });
+  return (await getHandoff(id))!;
+}
+
+export async function markHandoffDelivered(id: string, actor: string, fingerprint: string): Promise<HandoffRow> {
+  return transition(id, actor, fingerprint, 'created', 'delivered', 'delivered', {});
+}
+
+/** Recompute the stored fingerprint from the row's own columns. */
+export function fingerprintOfRow(row: HandoffRow): string {
+  return fingerprintHandoff({
+    id: row.id,
+    sourceAgentGroupId: row.source_agent_group_id,
+    reviewerAgentGroupId: row.reviewer_agent_group_id,
+    project: row.project,
+    goal: row.goal,
+    outcome: row.outcome,
+    scope: row.scope,
+    authority: row.authority,
+  });
+}
+
+/**
+ * Bind the verification inputs to the ledger fingerprint they were captured
+ * against. Editing either the handoff row or the inputs row breaks this hash,
+ * which is what the host verifier re-derives before it starts a container.
+ */
+export function fingerprintVerificationInputs(ledgerFingerprint: string, inputs: VerificationInputs): string {
+  return createHash('sha256')
+    .update(`${ledgerFingerprint}\n${canonicalVerificationInputs(inputs)}`)
+    .digest('hex');
+}
+
+export interface DeliverHandoffWithInputsArgs {
+  id: string;
+  actor: string;
+  fingerprint: string;
+  inputs: { class: string; checkpoint: string; checks: string[]; reproduce: string[] };
+}
+
+export interface VerificationInputsRow {
+  handoff_id: string;
+  class: string;
+  checkpoint: string;
+  checks_json: string;
+  reproduce_json: string;
+  inputs_fingerprint: string;
+  captured_at: string;
+  captured_by: string;
+}
+
+export async function getVerificationInputs(handoffId: string): Promise<VerificationInputsRow | undefined> {
+  return getDb().get<VerificationInputsRow>('SELECT * FROM verification_inputs WHERE handoff_id = ?', handoffId);
+}
+
+/**
+ * The single atomic `created` → `delivered` operation: capture the commands
+ * the host may later execute and move the handoff, or do neither.
+ *
+ * Inputs are validated BEFORE the transaction opens, so a malformed CHECKS
+ * array throws without touching the DB at all. Everything else — status,
+ * actor, fingerprint, self-consistency of the row, the inputs insert, the
+ * status update and the `delivered` event — happens inside one transaction, so
+ * any failure leaves the handoff `created`, with no inputs row and no event.
+ */
+export async function deliverHandoffWithInputs(args: DeliverHandoffWithInputsArgs): Promise<HandoffRow> {
+  const inputs = validateVerificationInputs(args.inputs);
+  const now = new Date().toISOString();
+
+  await getDb().transaction(async () => {
+    const row = await mustGetHandoff(args.id);
+    expectStatus(row, 'created');
+    expectActor(args.actor, row.source_agent_group_id, 'source');
+    expectFingerprint(row, args.fingerprint);
+    if (fingerprintOfRow(row) !== row.fingerprint) {
+      throw new Error(`handoff ${row.id} ledger fingerprint does not match its own fields`);
+    }
+
+    const inputsFingerprint = fingerprintVerificationInputs(row.fingerprint, inputs);
+    await getDb().run(
+      `INSERT INTO verification_inputs
+         (handoff_id, class, checkpoint, checks_json, reproduce_json, inputs_fingerprint, captured_at, captured_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      row.id,
+      inputs.class,
+      inputs.checkpoint,
+      JSON.stringify(inputs.checks),
+      JSON.stringify(inputs.reproduce),
+      inputsFingerprint,
+      now,
+      args.actor,
+    );
+
+    const result = await getDb().run(
+      `UPDATE handoffs SET status = 'delivered', updated_at = ? WHERE id = ? AND status = 'created'`,
+      now,
+      row.id,
+    );
+    if (result.changes !== 1) throw new Error(`handoff ${row.id} changed concurrently; reload before continuing`);
+
+    await appendEvent(
+      row.id,
+      'delivered',
+      args.actor,
+      { fingerprint: row.fingerprint, inputs_fingerprint: inputsFingerprint },
+      now,
+    );
+  });
+
+  return (await getHandoff(args.id))!;
+}
+
+function reviewStatus(outcome: ReviewOutcome): HandoffStatus {
+  if (outcome === 'APPROVED' || outcome === 'APPROVED WITH MINOR NOTES') return 'approved';
+  if (outcome === 'CHANGES REQUIRED') return 'changes_required';
+  return 'review_blocked';
+}
+
+export async function reviewHandoff(
+  id: string,
+  actor: string,
+  fingerprint: string,
+  reviewOutcome: ReviewOutcome,
+  notes = '',
+): Promise<HandoffRow> {
+  const row = await mustGetHandoff(id);
+  expectActor(actor, row.reviewer_agent_group_id, 'reviewer');
+  expectFingerprint(row, fingerprint);
+  expectStatus(row, 'delivered');
+  const status = reviewStatus(reviewOutcome);
+  const now = new Date().toISOString();
+  await getDb().transaction(async () => {
+    const result = await getDb().run(
+      `UPDATE handoffs
+       SET status = ?, review_outcome = ?, review_notes = ?, updated_at = ?
+       WHERE id = ? AND status = 'delivered'`,
+      status,
+      reviewOutcome,
+      notes.trim() || null,
+      now,
+      id,
+    );
+    if (result.changes !== 1) throw new Error(`handoff ${id} changed concurrently; reload before reviewing`);
+    await appendEvent(id, status, actor, { fingerprint, review_outcome: reviewOutcome, notes: notes.trim() }, now);
+  });
+  return (await getHandoff(id))!;
+}
+
+export async function acknowledgeHandoff(id: string, actor: string, fingerprint: string): Promise<HandoffRow> {
+  return transition(id, actor, fingerprint, 'approved', 'acknowledged', 'acknowledged', {});
+}
+
+export async function closeHandoff(
+  id: string,
+  actor: string,
+  fingerprint: string,
+  evidence: string,
+): Promise<HandoffRow> {
+  const closureEvidence = required('closure evidence', evidence);
+  return transition(
+    id,
+    actor,
+    fingerprint,
+    'acknowledged',
+    'closed',
+    'closed',
+    { evidence: closureEvidence },
+    {
+      closureEvidence,
+    },
+  );
+}
+
+async function transition(
+  id: string,
+  actor: string,
+  fingerprint: string,
+  from: HandoffStatus,
+  to: HandoffStatus,
+  eventType: string,
+  payload: Record<string, unknown>,
+  options: { closureEvidence?: string } = {},
+): Promise<HandoffRow> {
+  const row = await mustGetHandoff(id);
+  expectActor(actor, row.source_agent_group_id, 'source');
+  expectFingerprint(row, fingerprint);
+  expectStatus(row, from);
+  const now = new Date().toISOString();
+  await getDb().transaction(async () => {
+    const result = await getDb().run(
+      `UPDATE handoffs
+       SET status = ?, closure_evidence = COALESCE(?, closure_evidence),
+           closed_at = CASE WHEN ? = 'closed' THEN ? ELSE closed_at END,
+           updated_at = ?
+       WHERE id = ? AND status = ?`,
+      to,
+      options.closureEvidence ?? null,
+      to,
+      now,
+      now,
+      id,
+      from,
+    );
+    if (result.changes !== 1) throw new Error(`handoff ${id} changed concurrently; reload before continuing`);
+    await appendEvent(id, eventType, actor, { fingerprint, ...payload }, now);
+  });
+  return (await getHandoff(id))!;
+}
+
+export async function listHandoffsForAgent(agentGroupId: string, status?: HandoffStatus): Promise<HandoffRow[]> {
+  if (status) {
+    return getDb().all<HandoffRow>(
+      `SELECT * FROM handoffs
+       WHERE (source_agent_group_id = ? OR reviewer_agent_group_id = ?) AND status = ?
+       ORDER BY updated_at DESC, id`,
+      agentGroupId,
+      agentGroupId,
+      status,
+    );
+  }
+  return getDb().all<HandoffRow>(
+    `SELECT * FROM handoffs
+     WHERE source_agent_group_id = ? OR reviewer_agent_group_id = ?
+     ORDER BY updated_at DESC, id`,
+    agentGroupId,
+    agentGroupId,
+  );
+}
+
+export async function listAllHandoffs(status?: HandoffStatus): Promise<HandoffRow[]> {
+  return status
+    ? getDb().all<HandoffRow>('SELECT * FROM handoffs WHERE status = ? ORDER BY updated_at DESC, id', status)
+    : getDb().all<HandoffRow>('SELECT * FROM handoffs ORDER BY updated_at DESC, id');
+}
+
+export async function listHandoffEvents(id: string): Promise<HandoffEventRow[]> {
+  await mustGetHandoff(id);
+  return getDb().all<HandoffEventRow>('SELECT * FROM handoff_events WHERE handoff_id = ? ORDER BY sequence', id);
+}

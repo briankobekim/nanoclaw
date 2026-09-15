@@ -28,3 +28,7 @@ import './slack-room-membership/index.js';
 import './canvas-actions/index.js';
 import './slack-onboarding/index.js';
 import './slack-agent-flow/index.js';
+import './handoff-ledger/index.js';
+// Verifier loads after the ledger: its migration's foreign key points at
+// `handoffs(id)`, and module migrations run in import order.
+import './verifier/index.js';
