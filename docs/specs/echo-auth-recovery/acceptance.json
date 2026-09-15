@@ -1,0 +1,62 @@
+{
+  "incident": "Echo availability recovery 2026-09-14",
+  "credentialReplacementAt": "2026-09-14T14:51:49.581Z",
+  "sameAccountIdentityVerified": true,
+  "existingVaultRecordOnly": true,
+  "secretMetadataAndAssignmentsPreserved": true,
+  "temporaryAuthJsonRemoved": true,
+  "protectedCredentialBackup": "/Users/kobekim/.onecli/backups/echo-dedicated-auth-20260914-LPT1mP",
+  "echoReply": {
+    "text": "Echo is back online.",
+    "timestamp": "2026-09-14T14:52:49.185Z",
+    "messageId": "msg-1789397569185-qm1v0r",
+    "slackDeliveryLocalTime": "2026-09-14 10:52:50.139 America/New_York",
+    "slackMessageId": "1789397570.122459",
+    "recoveryAcknowledgment": "completed"
+  },
+  "freshEchoRuntime": {
+    "containerId": "c9e26107c1d1",
+    "readOnlyFilesystemError": false,
+    "tokenExpiredError": false,
+    "invalidRefreshTokenError": false,
+    "unauthorized401Error": false
+  },
+  "gatewayImage": "sha256:392c2a9c358f01607c9bc841c7458c83f23f8343b6949b3260ca5b35a7131b5a",
+  "gatewayRegressionCheck": {
+    "at": "2026-09-14T14:57:36.739Z",
+    "approvedImage": true,
+    "running": true,
+    "healthy": true,
+    "noMissingClientIdRegression": true,
+    "largeLogScan": "streaming bounded overlap; passed"
+  },
+  "atlasVerification": {
+    "at": "2026-09-14T14:55:49.457Z",
+    "kind": "isolated provider availability only",
+    "model": "claude-sonnet-5",
+    "effort": "medium",
+    "exitCode": 0,
+    "isError": false,
+    "exactSentinelMatched": false,
+    "liveAtlasConversationTested": false
+  },
+  "unchanged": [
+    "agent models",
+    "agent images",
+    "read-only credential mounts",
+    "memories",
+    "project code",
+    "PostgreSQL version"
+  ],
+  "memoryUpgradeActivated": false,
+  "rollbackConstraint": "Never restore old consumed or replaced OAuth credential ciphertext",
+  "remainingLimitation": "Fresh dedicated credential works; future natural token expiry has not elapsed. Pinned upstream client-id fix and deterministic deployment tripwire address the diagnosed refresh defect.",
+  "cleanup": {
+    "at": "2026-09-14T14:58:29.988Z",
+    "isolatedCredentialCopiesRemoved": true,
+    "temporaryLoginDirectoryRemoved": true,
+    "incidentLockReleased": true,
+    "protectedBackupsRetained": true
+  },
+  "incidentRepairBatches": 3
+}

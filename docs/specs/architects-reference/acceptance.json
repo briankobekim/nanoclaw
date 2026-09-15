@@ -1,0 +1,32 @@
+{
+  "verifiedAt": "2026-09-14T15:48:49.911Z",
+  "evidenceType": "Actual docker exec sha256sum and test ! -w; both invocations exited 0",
+  "containers": [
+    "ncl-44a1d5b3-sess-1789390403180-eyiv9k",
+    "ncl-44a1d5b3-sess-1789390402324-exnlxe"
+  ],
+  "identicalOutputsForBoth": {
+    "registry": "3ae7c242a7cf169118e0ad61ee6ac721765d1c2cb815972ab332dcbe3a174ac2",
+    "brief": "f8b5eb09c9b2b94223573c697a49c12aa4ec399336315ee4abe33e29e3fb80d6",
+    "sources": {
+      "chatgpt-handoff-excerpt.json": "6198c70236e264ab60d62e735aae5953ea642e34cb31e7ac215334cb06424c17",
+      "presentation-guide.md": "01c8cefb4a79bca7a7d6a59dcec18b2c7f2b74674313da6e3ddcb39173f17ac8",
+      "research-and-qa.md": "b6ca969a34012e9cd3511d3a5ee7d1e1b7f8898ce33b7bd94fce6dc42bff5782",
+      "phase2-qa.md": "959c3f83690bf5fe363c6d23db2e61b03b7dd33ab09ce4e0d7dbb234a5586087"
+    },
+    "provenance": "a0c38c4cadb1c648792abe96ce0a2baa2187be22adebdc4b8dbbf34441da1f56",
+    "markers": [
+      "REFERENCE_READ_ONLY",
+      "NO_ARCH_REPO_PATH"
+    ]
+  },
+  "actualMountMetadata": {
+    "projectsRW": false,
+    "archCheckoutMounted": false
+  },
+  "sourceRepository": {
+    "head": "e755b7bf9d56fd8ba1c735e52880af83c1219f9b",
+    "gitStatusShort": ""
+  },
+  "liveModelOrConversationTest": false
+}
