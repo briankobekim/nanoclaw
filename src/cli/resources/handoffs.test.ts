@@ -122,3 +122,78 @@ describe('handoffs CLI', () => {
     if (!response.ok) expect(response.error.message).toBe('handoff not found: CLI-HANDOFF-PRIVATE');
   });
 });
+
+describe('handoff revisions via ncl', () => {
+  it('ncl handoffs create forwards --supersedes to the ledger', async () => {
+    const create = await dispatch(
+      {
+        id: 'req-rev-create',
+        command: 'handoffs-create',
+        args: {
+          id: 'CLI-REV-1',
+          reviewer: ECHO,
+          project: 'none',
+          goal: 'Round one',
+          outcome: 'One formal outcome',
+          scope: 'Policy text only',
+          authority: 'recommend',
+        },
+      },
+      caller(ATLAS, 'sess-atlas-dm'),
+    );
+    expect(create.ok).toBe(true);
+    if (!create.ok) return;
+    const fingerprint = (create.data as { fingerprint: string }).fingerprint;
+    await dispatch(
+      { id: 'req-rev-deliver', command: 'handoffs-deliver', args: { id: 'CLI-REV-1', fingerprint } },
+      caller(ATLAS, 'sess-atlas-dm'),
+    );
+    const reviewed = await dispatch(
+      {
+        id: 'req-rev-review',
+        command: 'handoffs-review',
+        args: { id: 'CLI-REV-1', fingerprint, outcome: 'CHANGES REQUIRED', notes: 'Tighten the scope.' },
+      },
+      caller(ECHO, 'sess-echo-dm'),
+    );
+    expect(reviewed.ok && (reviewed.data as { status: string }).status).toBe('changes_required');
+
+    const revision = await dispatch(
+      {
+        id: 'req-rev-create-2',
+        command: 'handoffs-create',
+        args: {
+          id: 'CLI-REV-2',
+          reviewer: ECHO,
+          project: 'none',
+          goal: 'Round two',
+          outcome: 'One formal outcome',
+          scope: 'Policy text only, tightened',
+          authority: 'recommend',
+          supersedes: 'CLI-REV-1',
+        },
+      },
+      caller(ATLAS, 'sess-atlas-dm'),
+    );
+    expect(revision.ok).toBe(true);
+    if (!revision.ok) return;
+    expect((revision.data as { supersedes: string | null }).supersedes).toBe('CLI-REV-1');
+
+    const got = await dispatch(
+      { id: 'req-rev-get', command: 'handoffs-get', args: { id: 'CLI-REV-2' } },
+      caller(ECHO, 'sess-echo-dm'),
+    );
+    expect(got.ok && (got.data as { supersedes: string | null }).supersedes).toBe('CLI-REV-1');
+
+    const priorEvents = await dispatch(
+      { id: 'req-rev-events', command: 'handoffs-events', args: { id: 'CLI-REV-1' } },
+      caller(ATLAS, 'sess-atlas-dm'),
+    );
+    expect(priorEvents.ok && (priorEvents.data as { event_type: string }[]).map((e) => e.event_type)).toEqual([
+      'created',
+      'delivered',
+      'changes_required',
+      'superseded',
+    ]);
+  });
+});

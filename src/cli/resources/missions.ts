@@ -80,16 +80,16 @@ function handoffStage(status: HandoffStatus): string {
   }
 }
 
-function handoffNextAction(status: HandoffStatus): string {
+function handoffNextAction(status: HandoffStatus, id: string): string {
   switch (status) {
     case 'created':
       return 'deliver formal handoff';
     case 'delivered':
       return 'reviewer records outcome';
     case 'changes_required':
-      return 'owner revises and creates new handoff';
+      return `source revises with ncl handoffs create --supersedes ${id}`;
     case 'review_blocked':
-      return 'resolve blocker and re-handoff';
+      return `resolve the blocker, then revise with ncl handoffs create --supersedes ${id}`;
     case 'approved':
       return 'owner acknowledges; confirm ship authority';
     case 'acknowledged':
@@ -104,7 +104,9 @@ function handoffShipping(status: HandoffStatus): 'no' | 'unknown' {
   return ['created', 'delivered', 'changes_required', 'review_blocked'].includes(status) ? 'no' : 'unknown';
 }
 
-function handoffMission(row: HandoffRow, names: Map<string, string>): MissionListRow {
+function handoffMission(row: HandoffRow, names: Map<string, string>, superseded: boolean): MissionListRow {
+  // A superseded round is finished work: its successor carries the thread
+  // forward, so it shows as terminal with nothing left to do.
   return {
     mission_id: row.id,
     kind: 'handoff',
@@ -112,11 +114,12 @@ function handoffMission(row: HandoffRow, names: Map<string, string>): MissionLis
     owner: names.get(row.source_agent_group_id) ?? row.source_agent_group_id,
     class: 'unknown',
     project: row.project,
-    stage: handoffStage(row.status),
+    stage: superseded ? 'superseded' : handoffStage(row.status),
     handoff_state: row.review_outcome ? `${row.status}: ${row.review_outcome}` : row.status,
-    next_action: handoffNextAction(row.status),
+    next_action: superseded ? 'none' : handoffNextAction(row.status, row.id),
     shipping_allowed: handoffShipping(row.status),
     updated_at: row.updated_at,
+    revises: row.supersedes ?? '',
   };
 }
 
@@ -198,6 +201,7 @@ async function taskMissions(groups: GroupRef[]): Promise<TaskMission[]> {
             next_action: taskNextAction(item.task),
             shipping_allowed: 'unknown',
             updated_at: latestIso(item.lastRun, item.task.timestamp),
+            revises: '',
           },
         });
       }
@@ -227,11 +231,15 @@ async function listMissions(args: Record<string, unknown>, ctx: CallerContext): 
           )
         : await listAllHandoffs();
   const cutoff = Date.now() - recentDays * 24 * 60 * 60 * 1000;
-  const handoffRows: HandoffMission[] = handoffs.map((row) => ({
-    sourceSessionId: row.source_session_id,
-    terminal: ['changes_required', 'review_blocked', 'closed'].includes(row.status),
-    row: handoffMission(row, names),
-  }));
+  const supersededIds = new Set(handoffs.map((row) => row.supersedes).filter((value): value is string => !!value));
+  const handoffRows: HandoffMission[] = handoffs.map((row) => {
+    const superseded = supersededIds.has(row.id);
+    return {
+      sourceSessionId: row.source_session_id,
+      terminal: superseded || ['changes_required', 'review_blocked', 'closed'].includes(row.status),
+      row: handoffMission(row, names, superseded),
+    };
+  });
   const visibleHandoffs = handoffRows.filter(({ row, terminal }) => !terminal || isRecent(row, cutoff));
   const linkedTaskSessions = new Set(
     visibleHandoffs.map(({ sourceSessionId }) => sourceSessionId).filter((value): value is string => Boolean(value)),
@@ -270,6 +278,11 @@ registerResource({
     { name: 'next_action', type: 'string', description: 'Next action supported by the current source state.' },
     { name: 'shipping_allowed', type: 'string', description: 'No or unknown; review alone never grants authority.' },
     { name: 'updated_at', type: 'string', description: 'Most recent timestamp exposed by the source record.' },
+    {
+      name: 'revises',
+      type: 'string',
+      description: 'Prior handoff ID when this mission is a revision; empty otherwise.',
+    },
   ],
   operations: {},
   customOperations: {

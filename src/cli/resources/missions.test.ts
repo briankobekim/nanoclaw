@@ -316,3 +316,102 @@ describe('missions CLI', () => {
     expect(ids).toEqual(expect.arrayContaining(['MISSION-SHARED-LINK', 'legacy-series-a', 'legacy-series-b']));
   });
 });
+
+describe('handoff revisions in the mission view', () => {
+  async function reviewed(id: string, outcome: 'CHANGES REQUIRED' | 'REVIEW BLOCKED'): Promise<void> {
+    const { fingerprint } = await createHandoff(id);
+    await dispatch({ id: `deliver-${id}`, command: 'handoffs-deliver', args: { id, fingerprint } }, agent(ATLAS));
+    const review = await dispatch(
+      { id: `review-${id}`, command: 'handoffs-review', args: { id, fingerprint, outcome } },
+      agent(ECHO),
+    );
+    expect(review.ok).toBe(true);
+  }
+
+  async function revise(prior: string, id: string): Promise<void> {
+    const response = await dispatch(
+      {
+        id: `revise-${id}`,
+        command: 'handoffs-create',
+        args: {
+          id,
+          reviewer: ECHO,
+          project: 'quiveriq',
+          goal: 'Review mission control, round two',
+          outcome: 'Verified CLI status',
+          scope: 'Mission view only',
+          authority: 'execute',
+          supersedes: prior,
+        },
+      },
+      agent(ATLAS),
+    );
+    expect(response.ok).toBe(true);
+    if (!response.ok) throw new Error(response.error.message);
+  }
+
+  async function missions(args: Record<string, unknown> = {}): Promise<Array<Record<string, unknown>>> {
+    const response = await dispatch(
+      { id: `missions-${Math.random()}`, command: 'missions-list', args },
+      { caller: 'host' },
+    );
+    expect(response.ok).toBe(true);
+    if (!response.ok) throw new Error(response.error.message);
+    return response.data as Array<Record<string, unknown>>;
+  }
+
+  it('a superseded handoff is labeled superseded with no next action', async () => {
+    await reviewed('MISSION-REV-1', 'CHANGES REQUIRED');
+    await revise('MISSION-REV-1', 'MISSION-REV-2');
+
+    const rows = await missions();
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mission_id: 'MISSION-REV-1',
+          stage: 'superseded',
+          next_action: 'none',
+          handoff_state: 'changes_required: CHANGES REQUIRED',
+        }),
+      ]),
+    );
+
+    await getDb().run("UPDATE handoffs SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?", 'MISSION-REV-1');
+    const recent = (await missions({ recent_days: 1 })).map((row) => row.mission_id);
+    expect(recent).not.toContain('MISSION-REV-1');
+    expect(recent).toContain('MISSION-REV-2');
+  });
+
+  it('changes_required and review_blocked next actions name the --supersedes revision', async () => {
+    await reviewed('MISSION-NEXT-CHANGES', 'CHANGES REQUIRED');
+    await reviewed('MISSION-NEXT-BLOCKED', 'REVIEW BLOCKED');
+    const rows = await missions();
+    for (const id of ['MISSION-NEXT-CHANGES', 'MISSION-NEXT-BLOCKED']) {
+      const row = rows.find((candidate) => candidate.mission_id === id)!;
+      expect(row.next_action).toContain(`--supersedes ${id}`);
+    }
+  });
+
+  it('a revision and its prior render as one thread', async () => {
+    await dispatch(
+      {
+        id: 'task-create-thread',
+        command: 'tasks-create',
+        args: { name: 'thread-task', prompt: 'Prepare briefing', process_after: '2999-01-01T00:00:00Z' },
+      },
+      agent(ATLAS),
+    );
+    await createHandoff('MISSION-FIRST-ROUND');
+    await reviewed('MISSION-THREAD-1', 'CHANGES REQUIRED');
+    await revise('MISSION-THREAD-1', 'MISSION-THREAD-2');
+
+    const rows = await missions();
+    const byId = new Map(rows.map((row) => [row.mission_id, row]));
+    expect(byId.get('MISSION-THREAD-2')).toMatchObject({ revises: 'MISSION-THREAD-1', stage: 'awaiting_delivery' });
+    expect(byId.get('MISSION-THREAD-1')).toMatchObject({ stage: 'superseded', revises: '' });
+    expect(byId.get('MISSION-FIRST-ROUND')).toMatchObject({ revises: '' });
+    const task = rows.find((row) => row.kind === 'task')!;
+    expect(task).toMatchObject({ revises: '' });
+    expect(rows.every((row) => typeof row.revises === 'string')).toBe(true);
+  });
+});

@@ -12,6 +12,8 @@ export interface MissionListRow {
   next_action: string;
   shipping_allowed: string;
   updated_at: string;
+  /** Prior handoff ID when this mission is a revision; empty otherwise. */
+  revises: string;
 }
 
 const COLS = [
@@ -22,6 +24,7 @@ const COLS = [
   'PROJECT',
   'STAGE',
   'REVIEW/HANDOFF',
+  'REVISES',
   'NEXT ACTION',
   'SHIP',
   'UPDATED',
@@ -46,6 +49,7 @@ export function formatMissionsTable(rows: MissionListRow[]): string {
     clip(row.project, 18),
     row.stage,
     row.handoff_state,
+    clip(row.revises || '-', 28),
     clip(row.next_action, 40),
     row.shipping_allowed,
     updated(row.updated_at),

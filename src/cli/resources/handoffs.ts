@@ -134,6 +134,12 @@ registerResource({
         { name: 'outcome', type: 'string', description: 'Desired result and evidence.', required: true },
         { name: 'scope', type: 'string', description: 'Included and excluded scope.', required: true },
         { name: 'authority', type: 'string', description: 'Approved authority.', required: true },
+        {
+          name: 'supersedes',
+          type: 'string',
+          description:
+            'Prior handoff ID this revision replaces; that handoff must be changes_required or review_blocked.',
+        },
       ],
       handler: async (args, ctx) => {
         const sourceAgentGroupId =
@@ -149,6 +155,7 @@ registerResource({
           outcome: stringArg(args, 'outcome')!,
           scope: stringArg(args, 'scope')!,
           authority: stringArg(args, 'authority')!,
+          supersedes: stringArg(args, 'supersedes', false),
         });
       },
     },

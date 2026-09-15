@@ -154,6 +154,17 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:approvals-reason-sweep:end
 
+  // Tell owners about handoffs that have sat in one open state past their
+  // threshold. Central-DB scan, once per tick; dedupe lives in handoff_events.
+  // MODULE-HOOK:handoff-stall-ping:start
+  try {
+    const { sweepStalledHandoffs } = await import('./modules/handoff-ledger/stall-ping.js');
+    await sweepStalledHandoffs();
+  } catch (err) {
+    log.error('Handoff stall sweep failed', { err });
+  }
+  // MODULE-HOOK:handoff-stall-ping:end
+
   setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
 }
 

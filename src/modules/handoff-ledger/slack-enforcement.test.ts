@@ -33,6 +33,7 @@ function row(status: HandoffRow['status'] = 'created'): HandoffRow {
     created_at: '2026-08-26T00:00:00.000Z',
     updated_at: '2026-08-26T00:00:00.000Z',
     closed_at: null,
+    supersedes: null,
   };
 }
 
@@ -342,5 +343,57 @@ describe('blocked messages tell the sender why', () => {
     expect(decision.action).toBe('drop');
     await new Promise((r) => setImmediate(r));
     expect(notifyRejection).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('revision handoffs carry their SUPERSEDES link', () => {
+  const PRIOR = 'HANDOFF-100';
+
+  it('a revision handoff message must carry the SUPERSEDES line that matches the ledger', async () => {
+    const notifyRejection = vi.fn(
+      async (_ctx: SlackBotInboundContext, _reason: string, _handoffId?: string) => undefined,
+    );
+    const revision = { ...row(), supersedes: PRIOR };
+
+    const ok = await createHandoffMessageEnforcer({ ...deps({ handoff: revision }), notifyRejection })(
+      context(handoffText({ SUPERSEDES: PRIOR })),
+    );
+    expect(ok.action).toBe('allow');
+    if (ok.action !== 'allow') return;
+    await ok.beforeForward?.();
+    expect(deliverWithInputs).toHaveBeenCalledTimes(1);
+
+    const missing = await createHandoffMessageEnforcer({ ...deps({ handoff: revision }), notifyRejection })(
+      context(handoffText()),
+    );
+    expect(missing).toMatchObject({
+      action: 'drop',
+      reason: expect.stringContaining('SUPERSEDES does not match the trusted ledger'),
+    });
+
+    const wrong = await createHandoffMessageEnforcer({ ...deps({ handoff: revision }), notifyRejection })(
+      context(handoffText({ SUPERSEDES: 'HANDOFF-999' })),
+    );
+    expect(wrong).toMatchObject({
+      action: 'drop',
+      reason: expect.stringContaining('SUPERSEDES does not match the trusted ledger'),
+    });
+
+    await new Promise((r) => setImmediate(r));
+    expect(notifyRejection).toHaveBeenCalledTimes(2);
+    for (const call of notifyRejection.mock.calls) {
+      expect(call[1]).toBe('SUPERSEDES does not match the trusted ledger');
+      expect(call[2]).toBe(ID);
+    }
+    expect(deliverWithInputs).toHaveBeenCalledTimes(1);
+  });
+
+  it('a first-round handoff message must not claim SUPERSEDES', async () => {
+    const decision = await createHandoffMessageEnforcer(deps())(context(handoffText({ SUPERSEDES: PRIOR })));
+    expect(decision).toMatchObject({
+      action: 'drop',
+      reason: expect.stringContaining('SUPERSEDES does not match the trusted ledger'),
+    });
+    expect(deliverWithInputs).not.toHaveBeenCalled();
   });
 });

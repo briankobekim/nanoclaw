@@ -212,6 +212,10 @@ export function createHandoffMessageEnforcer(deps: HandoffMessageEnforcementDeps
       if (missing.length > 0) return reject(ctx, `incomplete handoff: missing ${missing.join(', ')}`, id);
       if (parsed.reviewOutcome) return reject(ctx, 'source handoff cannot contain a formal review outcome', id);
       if (row.status !== 'created') return reject(ctx, `handoff is ${row.status}; expected created`, id);
+      // A revision must name the round it replaces, and a first round must not
+      // claim one: the line is bound to the ledger column exactly like PROJECT.
+      const supersedesMismatch = mismatch('SUPERSEDES', row.supersedes ?? '', parsed.fields.get('SUPERSEDES') ?? '');
+      if (supersedesMismatch) return reject(ctx, supersedesMismatch, id);
 
       // Validate the verification inputs at DECISION time so the sender gets a
       // named reason. The guard drops a message whose `beforeForward` throws,

@@ -36,6 +36,8 @@ export interface HandoffRow {
   created_at: string;
   updated_at: string;
   closed_at: string | null;
+  /** Prior handoff this row revises (round two and later); null on a first round. */
+  supersedes: string | null;
 }
 
 export interface HandoffEventRow {
@@ -58,7 +60,22 @@ export interface CreateHandoffInput {
   outcome: string;
   scope: string;
   authority: string;
+  /**
+   * Prior handoff id when this is a revision. The prior must belong to the same
+   * source, reviewer and project, be `changes_required` or `review_blocked`, and
+   * not already have a successor.
+   */
+  supersedes?: string | null;
 }
+
+/** Event appended to the prior handoff when a revision is created. */
+export const SUPERSEDED_EVENT = 'superseded';
+/** Event appended by the host stall sweep after it told an owner about a stalled handoff. */
+export const OWNER_PINGED_EVENT = 'owner_pinged';
+/** Non-agent actor recorded on owner-ping events, alongside the verifier's `host:verifier`. */
+export const HOST_PING_ACTOR = 'host:ping';
+
+const REVISABLE_STATUSES: ReadonlySet<HandoffStatus> = new Set(['changes_required', 'review_blocked']);
 
 /**
  * A handoff id is used as a path segment by the verifier's evidence directory,
@@ -95,8 +112,9 @@ function canonical(input: {
   outcome: string;
   scope: string;
   authority: string;
+  supersedes?: string | null;
 }): string {
-  return JSON.stringify({
+  const fields: Record<string, string> = {
     id: input.id,
     source_agent_group_id: input.sourceAgentGroupId,
     reviewer_agent_group_id: input.reviewerAgentGroupId,
@@ -105,7 +123,12 @@ function canonical(input: {
     outcome: input.outcome,
     scope: input.scope,
     authority: input.authority,
-  });
+  };
+  // The revision link is part of the contract, so it is hashed — but only when
+  // present. A first-round row keeps the byte-identical pre-v2 canonical form,
+  // so every fingerprint stored before the link existed stays valid.
+  if (input.supersedes) fields.supersedes = input.supersedes;
+  return JSON.stringify(fields);
 }
 
 export function fingerprintHandoff(input: Parameters<typeof canonical>[0]): string {
@@ -176,6 +199,13 @@ export async function createHandoff(input: CreateHandoffInput): Promise<HandoffR
   if (input.sourceAgentGroupId === input.reviewerAgentGroupId) {
     throw new Error('source and reviewer must be different agents');
   }
+  const supersedes = input.supersedes?.trim() || null;
+  if (supersedes) {
+    if (supersedes === id) throw new Error('a handoff cannot supersede itself');
+    if (supersedes === '.' || supersedes === '..' || !ID_PATTERN.test(supersedes)) {
+      throw new Error('supersedes must be an existing handoff id');
+    }
+  }
   const fingerprint = fingerprintHandoff({
     id,
     sourceAgentGroupId: input.sourceAgentGroupId,
@@ -185,14 +215,40 @@ export async function createHandoff(input: CreateHandoffInput): Promise<HandoffR
     outcome,
     scope,
     authority,
+    supersedes,
   });
   const now = new Date().toISOString();
   await getDb().transaction(async () => {
+    // A revision is validated against the prior INSIDE the transaction so the
+    // `superseded` event, the successor row and the one-successor rule commit
+    // or fail together.
+    let prior: HandoffRow | undefined;
+    if (supersedes) {
+      prior = await getHandoff(supersedes);
+      if (!prior) throw new Error(`handoff not found: ${supersedes}`);
+      if (fingerprintOfRow(prior) !== prior.fingerprint) {
+        throw new Error(`handoff ${prior.id} ledger fingerprint does not match its own fields`);
+      }
+      if (
+        prior.source_agent_group_id !== input.sourceAgentGroupId ||
+        prior.reviewer_agent_group_id !== input.reviewerAgentGroupId ||
+        prior.project !== project
+      ) {
+        throw new Error(`revision must match the source, reviewer, and project of ${prior.id}`);
+      }
+      if (!REVISABLE_STATUSES.has(prior.status)) {
+        throw new Error(
+          `handoff ${prior.id} is ${prior.status}; only a changes_required or review_blocked handoff can be revised`,
+        );
+      }
+      const successor = await getDb().get<{ id: string }>('SELECT id FROM handoffs WHERE supersedes = ?', prior.id);
+      if (successor) throw new Error(`handoff ${prior.id} is already superseded by ${successor.id}`);
+    }
     await getDb().run(
       `INSERT INTO handoffs
          (id, source_agent_group_id, reviewer_agent_group_id, source_session_id,
-          project, goal, outcome, scope, authority, fingerprint, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?)`,
+          project, goal, outcome, scope, authority, fingerprint, status, created_at, updated_at, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)`,
       id,
       input.sourceAgentGroupId,
       input.reviewerAgentGroupId,
@@ -205,10 +261,44 @@ export async function createHandoff(input: CreateHandoffInput): Promise<HandoffR
       fingerprint,
       now,
       now,
+      supersedes,
     );
-    await appendEvent(id, 'created', input.sourceAgentGroupId, { fingerprint, project, goal }, now);
+    await appendEvent(
+      id,
+      'created',
+      input.sourceAgentGroupId,
+      supersedes ? { fingerprint, project, goal, supersedes } : { fingerprint, project, goal },
+      now,
+    );
+    if (prior) {
+      await appendEvent(
+        prior.id,
+        SUPERSEDED_EVENT,
+        input.sourceAgentGroupId,
+        { fingerprint: prior.fingerprint, successor: id },
+        now,
+      );
+    }
   });
   return (await getHandoff(id))!;
+}
+
+export interface OwnerPingRecord {
+  status: HandoffStatus;
+  updated_at: string;
+  pinged_at: string;
+  recipient: string;
+  platform_message_id: string | null;
+}
+
+/**
+ * Append the host's record that an owner was told about a stalled handoff.
+ * Pure audit trail: it never touches the handoff row, and the stall sweep uses
+ * it to avoid telling the same owner about the same stall twice.
+ */
+export async function recordOwnerPing(id: string, record: OwnerPingRecord): Promise<void> {
+  await mustGetHandoff(id);
+  await appendEvent(id, OWNER_PINGED_EVENT, HOST_PING_ACTOR, { ...record }, record.pinged_at);
 }
 
 export async function markHandoffDelivered(id: string, actor: string, fingerprint: string): Promise<HandoffRow> {
@@ -226,6 +316,7 @@ export function fingerprintOfRow(row: HandoffRow): string {
     outcome: row.outcome,
     scope: row.scope,
     authority: row.authority,
+    supersedes: row.supersedes,
   });
 }
 

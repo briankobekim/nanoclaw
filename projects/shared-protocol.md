@@ -119,6 +119,7 @@ sides so a missing field is mechanically detectable.
 ```
 HANDOFF_ID:   unique stable ID for this review item
 FINGERPRINT:  exact SHA-256 fingerprint returned by `ncl handoffs create`
+SUPERSEDES:   prior HANDOFF_ID when this is a revision; omit on a first round
 PROJECT:      registered project name, or "none"
 GOAL:         what this change is meant to accomplish
 OUTCOME:      desired real-world result and observable success evidence
@@ -247,12 +248,16 @@ agent running scripts or trusting the other's self-report.
   relevant recorded output. Any `VERIFIER_ERROR` is REVIEW BLOCKED: the frozen
   list was not finished under proven isolation, so name its `error_reason`
   instead of reading the checks that did run as a result.
-- A `changes_required` outcome is never resubmitted against the same handoff.
-  Atlas makes the fix, then creates a brand-new `HANDOFF_ID` with a freshly
-  captured `CHECKPOINT`, `CHECKS`, and evidence; the original handoff stays
-  closed against its own failed verification. `run_checks` verifies an ID
-  exactly once — never an ID that was already verified, and never one that
-  was never `delivered`.
+- A `changes_required` or `review_blocked` outcome is answered with a
+  **revision**, never a resubmission of the same handoff. Atlas makes the fix,
+  then creates a new handoff with `ncl handoffs create --supersedes <prior
+  HANDOFF_ID> …`, a freshly captured `CHECKPOINT`, `CHECKS`, and evidence, and
+  posts it with a `SUPERSEDES:` line naming the prior id. The ledger links the
+  two rounds (the prior gains a `superseded` event and keeps its own state),
+  refuses a revision of anything but a `changes_required` or `review_blocked`
+  handoff, and allows exactly one revision per prior. `run_checks` verifies an
+  ID exactly once — never an ID that was already verified, and never one that
+  was never `delivered`; a revision is a new ID with its own run.
 
 ---
 
@@ -297,8 +302,13 @@ recognized by the ledger and the review is not recorded.
 
 `APPROVED`, `APPROVED WITH MINOR NOTES`, and `CHANGES REQUIRED` for code work
 follow the evidence rules in Verification, above, including quoting the
-host-attested `record_sha256` and, on `CHANGES REQUIRED`, requiring a new
-handoff rather than a resubmission of the same one.
+host-attested `record_sha256` and, on `CHANGES REQUIRED`, requiring a linked
+revision (`--supersedes`) rather than a resubmission of the same one.
+
+On a revision (a handoff carrying `SUPERSEDES:`), Echo first reads the prior
+round with `ncl handoffs get --id <prior>` (its `review_notes`) and
+`ncl handoffs events --id <prior>`, and confirms each prior note is addressed
+before applying the class tier. An unaddressed note is `CHANGES REQUIRED` again.
 
 In a shared Slack room, Echo begins a review intended for Atlas with Atlas's
 actual mention, `<@U0BSP5T2JP2>`. A display-name reference alone is not a routed

@@ -50,3 +50,23 @@ export const handoffLedgerMigration: ModuleMigration = {
 };
 
 registerMigration(handoffLedgerMigration);
+
+/**
+ * v2: a revision is a new handoff that points at the round it replaces. The
+ * column is nullable and unread by pre-v2 code, so this migration is one-way by
+ * design; rolling back the code leaves it inert. The partial unique index is the
+ * database-level guarantee that a handoff has at most one successor.
+ */
+export const handoffSupersedesMigration: ModuleMigration = {
+  version: 2,
+  name: 'module:nanoclaw.handoff-ledger:supersedes',
+  up: async (db) => {
+    await db.exec(`
+      ALTER TABLE handoffs ADD COLUMN supersedes TEXT NULL REFERENCES handoffs(id);
+      CREATE UNIQUE INDEX idx_handoffs_supersedes
+        ON handoffs(supersedes) WHERE supersedes IS NOT NULL;
+    `);
+  },
+};
+
+registerMigration(handoffSupersedesMigration);

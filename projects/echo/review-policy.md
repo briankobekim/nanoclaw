@@ -26,6 +26,14 @@ Rules:
   container's removal confirmed by docker. Anything less is never an approval.
 - "Second family" means a reviewer running on a different model family than Echo (e.g. via `opencode run --model ...`). Until that is wired up, Echo notes `second_family: not available` in the review and Kobe reviews manually for those classes.
 
+## Revisions (2026-09-15)
+
+A handoff carrying `SUPERSEDES: <prior>` is round two or later. Before applying the class tier:
+run `ncl handoffs get --id <prior>` (its `review_notes`) and `ncl handoffs events --id <prior>`,
+then list each prior note and whether the revision addresses it. Any unaddressed note is
+`CHANGES REQUIRED` again, naming it. The verifier runs on the revision's own id; the prior's
+evidence is history, not proof.
+
 ## Review dimensions (moved here from Echo's instructions, 2026-09-14)
 
 Cover: correctness, regressions, security, data integrity, maintainability, evidence, tests, product behavior, visual consistency, follow-through.
