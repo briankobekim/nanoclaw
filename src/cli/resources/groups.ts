@@ -572,7 +572,11 @@ registerResource({
         const mount: AdditionalMountConfig = {
           hostPath,
           containerPath,
-          ...(args.ro || args.readonly ? { readonly: true } : {}),
+          // Mount security grants write access only when the request is
+          // explicitly `readonly: false`. Omitting this field therefore turns
+          // the CLI's documented default into read-only, even when the
+          // operator-approved root allows writes.
+          readonly: Boolean(args.ro || args.readonly),
         };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {

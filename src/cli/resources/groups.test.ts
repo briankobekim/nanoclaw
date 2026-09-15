@@ -305,4 +305,24 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     expect(rm.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
+
+  it('records an explicit read-write request when --ro is absent', async () => {
+    const GID = 'ag-mount-rw';
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm-rw', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const add = await dispatch(
+      {
+        id: 'r-rw',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '/data/project', container: 'project' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(add.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
+      { hostPath: '/data/project', containerPath: 'project', readonly: false },
+    ]);
+  });
 });
