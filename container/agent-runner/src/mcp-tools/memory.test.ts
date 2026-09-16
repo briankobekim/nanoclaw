@@ -119,6 +119,31 @@ describe('memory_write', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
+  it('refuses case aliases of reserved names and deletes of scaffold-managed files; replace of those stays allowed', async () => {
+    const invalid: Record<string, unknown>[] = [
+      { path: 'Owner-statements.md', mode: 'append', content: 'x' },
+      { path: 'OWNER-STATEMENTS.md', mode: 'replace', content: 'x' },
+      { path: 'index.md', mode: 'delete' },
+      { path: 'Index.md', mode: 'delete' },
+      { path: 'system/index.md', mode: 'delete' },
+      { path: 'SYSTEM/definition.md', mode: 'delete' },
+    ];
+    for (const args of invalid) {
+      const result = await memoryWrite.handler(args);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith('Error:');
+    }
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    const scaffoldDelete = await memoryWrite.handler({ path: 'system/definition.md', mode: 'delete' });
+    expect(scaffoldDelete.content[0].text).toContain('scaffold-managed');
+
+    const replaceIndex = await memoryWrite.handler({ path: 'index.md', mode: 'replace', content: '# fresh index' });
+    expect(replaceIndex.isError).not.toBe(true);
+    const deleteOther = await memoryWrite.handler({ path: 'sub/index.md', mode: 'delete' });
+    expect(deleteOther.isError).not.toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(2);
+  });
+
   it('accepts a path at the 200-character cap and content at exactly 2000 bytes', async () => {
     const path200 = `${'a'.repeat(197)}.md`;
     expect(path200.length).toBe(200);

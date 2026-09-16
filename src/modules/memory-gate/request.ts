@@ -66,6 +66,8 @@ export function memoryGateDeps(): MemoryGateDeps {
 }
 
 const MODES = new Set(['replace', 'append', 'delete']);
+/** Reserved names are compared case-insensitively: the host filesystem may fold case, so `Index.md` IS `index.md`. */
+const SCAFFOLD_MANAGED_LOWER = new Set<string>(TEMPLATE_FILES.map((rel) => rel.toLowerCase()));
 const SEGMENT = /^[A-Za-z0-9._-]+$/;
 const MAX_PATH = 200;
 const MAX_REQUEST_ID = 64;
@@ -88,12 +90,15 @@ export function shapeError(content: Record<string, unknown>): string | null {
     return 'path segments may use only letters, digits, dot, underscore, and dash';
   }
   if (!p.endsWith('.md')) return 'path must end in .md';
-  if (p === OWNER_STATEMENTS_PATH) return `${OWNER_STATEMENTS_PATH} is written only from Kobe's remember: messages`;
+  const lower = p.toLowerCase();
+  if (lower === OWNER_STATEMENTS_PATH) {
+    return `${OWNER_STATEMENTS_PATH} is written only from Kobe's remember: messages`;
+  }
   if (mode === 'delete') {
     if (content.content !== undefined && content.content !== null) return 'delete takes no content';
     // A scaffold-managed file is recreated from its template at every spawn
     // and completion tick, so an approved delete would be silently undone.
-    if ((TEMPLATE_FILES as readonly string[]).includes(p)) {
+    if (SCAFFOLD_MANAGED_LOWER.has(lower)) {
       return `${p} is scaffold-managed and is recreated when missing; use replace to change it`;
     }
     return null;

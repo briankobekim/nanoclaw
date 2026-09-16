@@ -276,6 +276,18 @@ function removeOpTemps(memoryRoot: string, ops: MemoryOpRow[]): void {
   }
 }
 
+/**
+ * The rename or unlink HAPPENED but the directory fsync failed: the file is
+ * already in its planned state, so this attempt may never abandon the op; the
+ * next tick recognizes `after_sha256` and marks it applied.
+ */
+class MutatedNotDurableError extends Error {
+  constructor(readonly cause: unknown) {
+    super(`mutation done but directory fsync failed: ${errorMessage(cause)}`);
+    this.name = 'MutatedNotDurableError';
+  }
+}
+
 /** The live target no longer matches what the ledger recorded: the op becomes a conflict, never a write. */
 class TargetChangedError extends Error {
   constructor(reason: string) {
@@ -355,6 +367,7 @@ function resolveTarget(memoryRoot: string, rel: string): Target {
   }
   let dir = memoryRoot;
   for (const segment of segments.slice(0, -1)) {
+    const parent = dir;
     dir = path.join(dir, segment);
     let st: fs.Stats;
     try {
@@ -364,12 +377,21 @@ function resolveTarget(memoryRoot: string, rel: string): Target {
       return { ok: false, reason: `parent directory missing: ${errorMessage(err)}` };
     }
     if (!st.isDirectory()) return { ok: false, reason: `path component is not a real directory: ${segment}` };
+    if (!spelledOnDisk(parent, segment)) {
+      return { ok: false, reason: `path spelling differs from the directory on disk: ${segment}` };
+    }
   }
-  const abs = path.join(dir, segments[segments.length - 1]!);
+  const leaf = segments[segments.length - 1]!;
+  const abs = path.join(dir, leaf);
   if (!abs.startsWith(memoryRoot + path.sep)) return { ok: false, reason: `path escapes memory root: ${rel}` };
   try {
     const st = fs.lstatSync(abs);
     if (!st.isFile()) return { ok: false, reason: 'target exists and is not a regular file' };
+    // The approval named THIS spelling; on a case-folding filesystem another
+    // spelling would silently resolve to a different-looking existing file.
+    if (!spelledOnDisk(dir, leaf)) {
+      return { ok: false, reason: `path spelling differs from the file on disk: ${leaf}` };
+    }
     // eslint-disable-next-line no-catch-all/no-catch-all -- only ENOENT means absent; every other lstat failure is reported as a conflict reason
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -377,6 +399,11 @@ function resolveTarget(memoryRoot: string, rel: string): Target {
     }
   }
   return { ok: true, abs };
+}
+
+/** True when `parent` lists an entry with exactly this name (byte-for-byte), whatever the filesystem folds. */
+function spelledOnDisk(parent: string, name: string): boolean {
+  return fs.readdirSync(parent).includes(name);
 }
 
 function readCurrent(abs: string): Buffer | null {
@@ -500,7 +527,7 @@ async function completeOne(op: MemoryOpRow, memoryRoot: string, deps: Completion
       await markConflict(op, err.message, deps);
       return;
     }
-    await failAttempt(op, attempts, err, deps);
+    await failAttempt(op, attempts, err, deps, { mutated: err instanceof MutatedNotDurableError });
     return;
   }
   await markApplied(op, attempts, deps);
@@ -516,7 +543,7 @@ function mutate(abs: string, planned: Buffer | null, tmp: string, recheck: () =>
     const changed = recheck();
     if (changed !== null) throw new TargetChangedError(changed);
     fs.unlinkSync(abs);
-    fsyncDirectory(path.dirname(abs));
+    fsyncDirectoryAfterMutation(path.dirname(abs));
     return;
   }
   removeQuietlyIfPresent(tmp);
@@ -540,7 +567,16 @@ function mutate(abs: string, planned: Buffer | null, tmp: string, recheck: () =>
     removeQuietly(tmp);
     throw err;
   }
-  fsyncDirectory(path.dirname(abs));
+  fsyncDirectoryAfterMutation(path.dirname(abs));
+}
+
+function fsyncDirectoryAfterMutation(dir: string): void {
+  try {
+    fsyncDirectory(dir);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- every failure here is post-mutation and must be classified as such for the ledger
+  } catch (err) {
+    throw new MutatedNotDurableError(err);
+  }
 }
 
 /**
@@ -620,10 +656,19 @@ async function markConflict(
   if (notify) await tellAgent(op, `memory write conflict: ${op.path} (${reason}); nothing was written`, deps);
 }
 
-async function failAttempt(op: MemoryOpRow, attempts: number, err: unknown, deps: CompletionDeps): Promise<void> {
+async function failAttempt(
+  op: MemoryOpRow,
+  attempts: number,
+  err: unknown,
+  deps: CompletionDeps,
+  options: { mutated?: boolean } = {},
+): Promise<void> {
   const message = errorMessage(err);
   const now = deps.now().toISOString();
-  if (attempts >= MAX_ATTEMPTS) {
+  // An op whose file already changed is never abandoned, whatever the attempt
+  // count: the ledger would then claim nothing happened. It stays `prepared`
+  // and the next tick resolves it by the after_sha256 match.
+  if (attempts >= MAX_ATTEMPTS && !options.mutated) {
     await getDb().run(
       `UPDATE memory_write_ops SET status = 'abandoned', last_error = ?, updated_at = ?
        WHERE agent_group_id = ? AND request_id = ?`,

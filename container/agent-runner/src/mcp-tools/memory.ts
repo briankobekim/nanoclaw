@@ -37,12 +37,16 @@ const MAX_PATH_CHARS = 200;
 const MAX_CONTENT_BYTES = 2000;
 const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
 const OWNER_FILE = 'owner-statements.md';
+/** Recreated by the host whenever missing, so a delete can never stick (replace is fine). */
+const SCAFFOLD_MANAGED = new Set(['index.md', 'system/index.md', 'system/definition.md']);
 
 /**
  * Relative, already-normalized, markdown-only paths under memory/: no leading
  * `/`, no backslash, no `.` or `..` segment, no empty segment, every segment
  * `[A-Za-z0-9._-]+`, a real name before `.md`, at most 200 characters, and
  * never the owner's own file (which only the host writes, via `remember:`).
+ * Reserved names are compared case-insensitively because the host filesystem
+ * may fold case.
  */
 function pathError(path: unknown): string | null {
   if (typeof path !== 'string' || path.length === 0) return 'path is required';
@@ -58,8 +62,15 @@ function pathError(path: unknown): string | null {
   }
   const name = segments[segments.length - 1];
   if (!name.endsWith('.md') || name.length <= 3) return 'path must name a markdown file ending in ".md"';
-  if (name === OWNER_FILE) {
+  if (name.toLowerCase() === OWNER_FILE) {
     return `${OWNER_FILE} is written only by the host from Kobe's own "remember:" messages`;
+  }
+  return null;
+}
+
+function scaffoldDeleteError(path: string, mode: Mode): string | null {
+  if (mode === 'delete' && SCAFFOLD_MANAGED.has(path.toLowerCase())) {
+    return `${path} is scaffold-managed and is recreated when missing; use replace to change it`;
   }
   return null;
 }
@@ -114,6 +125,8 @@ export const memoryWrite: McpToolDefinition = {
     const badPath = pathError(path);
     if (badPath) return error(badPath);
     if (!isMode(mode)) return error(`mode must be one of ${MODES.join(', ')}`);
+    const badDelete = scaffoldDeleteError(path as string, mode);
+    if (badDelete) return error(badDelete);
     const badContent = contentError(mode, content);
     if (badContent) return error(badContent);
 

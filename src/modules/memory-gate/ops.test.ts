@@ -535,6 +535,70 @@ describe('memory-gate ops completion', () => {
     expect(dirFsyncs).toBe(3);
   });
 
+  it('an approved path must be spelled on disk exactly as approved, so a case-folding filesystem cannot redirect it', async () => {
+    const folds = fs.existsSync(path.join(memoryRoot, 'NOTES.MD'));
+    await enqueueMemoryOp(free('c1', 'NOTES.md', 'replace', 'through an alias'));
+    await enqueueMemoryOp(free('c2', 'SYSTEM/definition.md', 'replace', 'through a directory alias'));
+    await completePendingOps(deps);
+    const c1 = (await getMemoryOp(GROUP, 'c1'))!;
+    const c2 = (await getMemoryOp(GROUP, 'c2'))!;
+    if (folds) {
+      // macOS default (APFS case-insensitive): the alias resolves to notes.md; refused as a conflict, nothing written.
+      expect(c1.status).toBe('conflict');
+      expect(c1.last_error).toMatch(/spelling differs from the file on disk: NOTES.md/);
+      expect(c2.status).toBe('conflict');
+      expect(c2.last_error).toMatch(/spelling differs from the directory on disk: SYSTEM/);
+      expect(read('notes.md')).toBe('hello\n');
+      expect(read('system/definition.md')).toBe('# def\n');
+    } else {
+      // Case-sensitive filesystem: NOTES.md is simply a new file; SYSTEM/ does not exist.
+      expect(c1.status).toBe('applied');
+      expect(c2.status).toBe('conflict');
+    }
+    expect(tmpFiles()).toEqual([]);
+  });
+
+  it('a directory-fsync failure after the mutation never abandons the op, even on the last attempt', async () => {
+    const realRename = fs.renameSync;
+    const realFsync = fs.fsyncSync;
+    let renameFailures = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (renameFailures < MAX_ATTEMPTS - 1) {
+        renameFailures += 1;
+        throw new Error('EIO: injected rename failure');
+      }
+      return realRename(from, to);
+    });
+    let failDirFsync = false;
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      if (failDirFsync && fs.fstatSync(fd).isDirectory()) throw new Error('EIO: injected directory fsync failure');
+      return realFsync(fd);
+    });
+
+    await enqueueMemoryOp(free('x1', 'notes.md', 'replace', 'landed on the last try'));
+    for (let i = 0; i < MAX_ATTEMPTS - 1; i++) await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'x1')).toMatchObject({ status: 'prepared', attempts: MAX_ATTEMPTS - 1 });
+    expect(read('notes.md')).toBe('hello\n');
+
+    // Tenth attempt: the rename succeeds, the directory fsync fails.
+    failDirFsync = true;
+    await completePendingOps(deps);
+    failDirFsync = false;
+    const afterTenth = (await getMemoryOp(GROUP, 'x1'))!;
+    expect(read('notes.md')).toBe('landed on the last try');
+    expect(afterTenth.status).toBe('prepared');
+    expect(afterTenth.attempts).toBe(MAX_ATTEMPTS);
+    expect(afterTenth.last_error).toMatch(/mutation done but directory fsync failed/);
+    expect(deps.notifyOwner).not.toHaveBeenCalled();
+    expect(agentNotices().some((text) => /abandoned/.test(text))).toBe(false);
+
+    // Next tick: the file is at after_sha256, so the op is applied; nothing is rewritten.
+    await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'x1')).toMatchObject({ status: 'applied', attempts: MAX_ATTEMPTS });
+    expect(read('notes.md')).toBe('landed on the last try');
+    expect(agentNotices().filter((text) => text === 'memory written: notes.md')).toHaveLength(1);
+  });
+
   it('appends after a missing trailing newline, replaces, and deletes, one file per op', async () => {
     fs.writeFileSync(path.join(memoryRoot, 'notes.md'), 'no newline');
     await enqueueMemoryOp(free('a1', 'notes.md', 'append', 'tail'));

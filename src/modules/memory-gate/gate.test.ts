@@ -465,6 +465,11 @@ describe('memory_write door', () => {
       request({ mode: 'delete', content: undefined, path: 'index.md' }),
       request({ mode: 'delete', content: undefined, path: 'system/index.md' }),
       request({ mode: 'delete', content: undefined, path: 'system/definition.md' }),
+      // Case aliases of reserved names: the host filesystem folds case.
+      request({ path: 'Owner-statements.md' }),
+      request({ path: 'OWNER-STATEMENTS.MD' }),
+      request({ mode: 'delete', content: undefined, path: 'Index.md' }),
+      request({ mode: 'delete', content: undefined, path: 'SYSTEM/definition.md' }),
     ];
     for (const content of bad) await dispatch()(content, session);
     expect(f.approvals).toHaveLength(0);
@@ -476,6 +481,10 @@ describe('memory_write door', () => {
       /scaffold-managed/,
     );
     expect(shapeError(request({ mode: 'replace', path: 'system/definition.md' }))).toBeNull();
+    expect(shapeError(request({ path: 'Owner-Statements.md' }))).toMatch(/written only from Kobe/);
+    expect(shapeError(request({ mode: 'delete', content: undefined, path: 'System/Index.md' }))).toMatch(
+      /scaffold-managed/,
+    );
     expect(shapeError(request({ mode: 'delete', content: undefined, path: 'operations/decisions.md' }))).toBeNull();
   });
 });
