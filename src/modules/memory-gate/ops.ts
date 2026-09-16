@@ -516,6 +516,7 @@ function mutate(abs: string, planned: Buffer | null, tmp: string, recheck: () =>
     const changed = recheck();
     if (changed !== null) throw new TargetChangedError(changed);
     fs.unlinkSync(abs);
+    fsyncDirectory(path.dirname(abs));
     return;
   }
   removeQuietlyIfPresent(tmp);
@@ -538,6 +539,22 @@ function mutate(abs: string, planned: Buffer | null, tmp: string, recheck: () =>
   } catch (err) {
     removeQuietly(tmp);
     throw err;
+  }
+  fsyncDirectory(path.dirname(abs));
+}
+
+/**
+ * Make a rename or unlink durable before the op is marked `applied`: the
+ * directory entry lives in the parent's metadata, which a crash can lose even
+ * after the file's own fsync. A failure here is one failed attempt; the next
+ * tick sees the file already at `after_sha256` and marks the op applied.
+ */
+function fsyncDirectory(dir: string): void {
+  const fd = fs.openSync(dir, fs.constants.O_RDONLY);
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
   }
 }
 

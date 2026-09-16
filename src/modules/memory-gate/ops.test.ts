@@ -487,6 +487,54 @@ describe('memory-gate ops completion', () => {
     expect(agentNotices().filter((text) => /conflict/i.test(text))).toHaveLength(3);
   });
 
+  it('a rename or unlink is marked applied only after the directory is durable', async () => {
+    // The temp file's own fsync succeeds; the directory fsync (a directory fd) fails once.
+    const realFsync = fs.fsyncSync;
+    let failDirOnce = true;
+    let dirFsyncs = 0;
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      if (fs.fstatSync(fd).isDirectory()) {
+        dirFsyncs += 1;
+        if (failDirOnce) {
+          failDirOnce = false;
+          throw new Error('EIO: injected directory fsync failure');
+        }
+      }
+      return realFsync(fd);
+    });
+    const renameSpy = vi.spyOn(fs, 'renameSync');
+
+    await enqueueMemoryOp(free('f1', 'notes.md', 'replace', 'durable'));
+    await completePendingOps(deps);
+    // The rename happened, but the op is NOT applied until the directory is durable.
+    expect(read('notes.md')).toBe('durable');
+    expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'prepared', attempts: 1 });
+    expect((await getMemoryOp(GROUP, 'f1'))!.last_error).toContain('injected directory fsync');
+    expect(tmpFiles()).toEqual([]);
+
+    // Next tick: the file already holds after_sha256, so it is applied without a second write.
+    await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'applied', attempts: 1 });
+    expect(renameSpy).toHaveBeenCalledTimes(1);
+    expect(agentNotices().filter((text) => text === 'memory written: notes.md')).toHaveLength(1);
+
+    // Same for a delete: unlinked, then applied only once the directory fsync succeeds.
+    failDirOnce = true;
+    await enqueueMemoryOp(free('f2', 'notes.md', 'delete', null));
+    await completePendingOps(deps);
+    expect(fs.existsSync(path.join(memoryRoot, 'notes.md'))).toBe(false);
+    expect(await getMemoryOp(GROUP, 'f2')).toMatchObject({ status: 'prepared', attempts: 1 });
+    await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'f2')).toMatchObject({ status: 'applied', after_sha256: 'absent' });
+    // A tick that finds the file already at after_sha256 does not mutate, so no fsync ran there.
+    expect(dirFsyncs).toBe(2);
+    // A clean write fsyncs the directory once, after the rename and before applied.
+    await enqueueMemoryOp(free('f3', 'notes.md', 'replace', 'again'));
+    await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'f3')).toMatchObject({ status: 'applied', attempts: 1 });
+    expect(dirFsyncs).toBe(3);
+  });
+
   it('appends after a missing trailing newline, replaces, and deletes, one file per op', async () => {
     fs.writeFileSync(path.join(memoryRoot, 'notes.md'), 'no newline');
     await enqueueMemoryOp(free('a1', 'notes.md', 'append', 'tail'));

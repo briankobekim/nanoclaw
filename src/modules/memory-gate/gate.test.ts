@@ -39,7 +39,7 @@ import './index.js';
 import { requestSha } from './guard.js';
 import { getMemoryOp } from './ops.js';
 import { setQuiesced } from './quiesce.js';
-import { setMemoryGateDeps, type MemoryGateDeps } from './request.js';
+import { setMemoryGateDeps, shapeError, type MemoryGateDeps } from './request.js';
 import type { RequestApprovalOptions } from '../approvals/primitive.js';
 
 const OWNER = 'slack:U0OWNER';
@@ -462,12 +462,21 @@ describe('memory_write door', () => {
       request({ path: 'owner-statements.md' }),
       request({ mode: 'append', content: undefined }),
       request({ mode: 'delete' }),
+      request({ mode: 'delete', content: undefined, path: 'index.md' }),
+      request({ mode: 'delete', content: undefined, path: 'system/index.md' }),
+      request({ mode: 'delete', content: undefined, path: 'system/definition.md' }),
     ];
     for (const content of bad) await dispatch()(content, session);
     expect(f.approvals).toHaveLength(0);
     expect(f.notices).toHaveLength(bad.length);
     expect(f.notices.every((n) => n.startsWith('memory request denied'))).toBe(true);
     expect(fs.readdirSync(memoryDir, { recursive: true }).sort()).toEqual(before);
+    // Scaffold-managed files are recreated when missing, so a delete is refused by reason; replace stays allowed.
+    expect(shapeError(request({ mode: 'delete', content: undefined, path: 'system/definition.md' }))).toMatch(
+      /scaffold-managed/,
+    );
+    expect(shapeError(request({ mode: 'replace', path: 'system/definition.md' }))).toBeNull();
+    expect(shapeError(request({ mode: 'delete', content: undefined, path: 'operations/decisions.md' }))).toBeNull();
   });
 });
 

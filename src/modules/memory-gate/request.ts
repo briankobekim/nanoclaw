@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getPendingApprovalsByAction } from '../../db/sessions.js';
 import { getDeliveryAdapter, reenterGuardedDeliveryAction } from '../../delivery.js';
+import { TEMPLATE_FILES } from '../../memory-scaffold.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { notifyAgent, requestApproval, RetainApprovalError, type ApprovalHandlerContext } from '../approvals/index.js';
@@ -90,6 +91,11 @@ export function shapeError(content: Record<string, unknown>): string | null {
   if (p === OWNER_STATEMENTS_PATH) return `${OWNER_STATEMENTS_PATH} is written only from Kobe's remember: messages`;
   if (mode === 'delete') {
     if (content.content !== undefined && content.content !== null) return 'delete takes no content';
+    // A scaffold-managed file is recreated from its template at every spawn
+    // and completion tick, so an approved delete would be silently undone.
+    if ((TEMPLATE_FILES as readonly string[]).includes(p)) {
+      return `${p} is scaffold-managed and is recreated when missing; use replace to change it`;
+    }
     return null;
   }
   if (typeof content.content !== 'string') return 'content is required for replace and append';

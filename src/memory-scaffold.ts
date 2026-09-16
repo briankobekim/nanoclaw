@@ -24,8 +24,12 @@ import { log } from './log.js';
  */
 const PROJECT_ROOT = process.cwd();
 const TEMPLATES_DIR = path.join(PROJECT_ROOT, 'container', 'agent-runner', 'src', 'memory', 'templates');
-/** Relative to both the templates dir and the group's memory dir. */
-const TEMPLATE_FILES = ['index.md', path.join('system', 'index.md'), path.join('system', 'definition.md')] as const;
+/**
+ * Relative to both the templates dir and the group's memory dir. These files
+ * are recreated from the shipped templates whenever they are missing, so a
+ * delete of one can never stick; the memory gate refuses such deletes.
+ */
+export const TEMPLATE_FILES = ['index.md', 'system/index.md', 'system/definition.md'] as const;
 
 export const OWNER_STATEMENTS_FRONTMATTER = '---\ntype: owner-statements\n---\n';
 
