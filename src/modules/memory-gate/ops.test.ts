@@ -20,6 +20,7 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { createSession } from '../../db/sessions.js';
+import { log } from '../../log.js';
 import {
   MAX_ATTEMPTS,
   OWNER_STATEMENTS_PATH,
@@ -158,6 +159,8 @@ beforeEach(async () => {
   fs.writeFileSync(path.join(memoryRoot, 'index.md'), '# index\n');
   fs.writeFileSync(path.join(memoryRoot, 'notes.md'), 'hello\n');
   fs.writeFileSync(path.join(memoryRoot, 'system', 'definition.md'), '# def\n');
+  // A complete scaffold, so the preflight creates nothing during these tests.
+  fs.writeFileSync(path.join(memoryRoot, 'system', 'index.md'), '# system index\n');
   deps = {
     notifyAgent: vi.fn().mockResolvedValue(undefined),
     notifyOwner: vi.fn().mockResolvedValue(undefined),
@@ -490,14 +493,26 @@ describe('memory-gate ops completion', () => {
   it('a rename or unlink is marked applied only after the directory is durable', async () => {
     // The temp file's own fsync succeeds; the directory fsync (a directory fd) fails a set number of times.
     const realFsync = fs.fsyncSync;
+    // The preflight fsyncs system/, memory/ and the group directory at the start of
+    // every tick; only the mutation path's own fsync of memory/ (the 4th and later
+    // directory fsync of a tick) is counted and failed here.
     let dirFailuresLeft = 2;
     let dirFsyncs = 0;
+    let dirFsyncsThisTick = 0;
+    const realComplete = completePendingOps;
+    const tick = async () => {
+      dirFsyncsThisTick = 0;
+      await realComplete(deps);
+    };
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
       if (fs.fstatSync(fd).isDirectory()) {
-        dirFsyncs += 1;
-        if (dirFailuresLeft > 0) {
-          dirFailuresLeft -= 1;
-          throw new Error('EIO: injected directory fsync failure');
+        dirFsyncsThisTick += 1;
+        if (dirFsyncsThisTick > 3) {
+          dirFsyncs += 1;
+          if (dirFailuresLeft > 0) {
+            dirFailuresLeft -= 1;
+            throw new Error('EIO: injected directory fsync failure');
+          }
         }
       }
       return realFsync(fd);
@@ -505,7 +520,7 @@ describe('memory-gate ops completion', () => {
     const renameSpy = vi.spyOn(fs, 'renameSync');
 
     await enqueueMemoryOp(free('f1', 'notes.md', 'replace', 'durable'));
-    await completePendingOps(deps);
+    await tick();
     // The rename happened, but the op is NOT applied until the directory is durable.
     expect(read('notes.md')).toBe('durable');
     expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'prepared', attempts: 1 });
@@ -514,13 +529,13 @@ describe('memory-gate ops completion', () => {
 
     // Next tick: the file already holds after_sha256, but the directory fsync is
     // RETRIED before applied; it fails again, so the row stays prepared (no rewrite).
-    await completePendingOps(deps);
+    await tick();
     expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'prepared', attempts: 1 });
     expect((await getMemoryOp(GROUP, 'f1'))!.last_error).toContain('directory fsync failed');
     expect(renameSpy).toHaveBeenCalledTimes(1);
     expect(dirFsyncs).toBe(2);
     // Third tick: the directory fsync succeeds and only then is the op applied.
-    await completePendingOps(deps);
+    await tick();
     expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'applied', attempts: 1 });
     expect(renameSpy).toHaveBeenCalledTimes(1);
     expect(dirFsyncs).toBe(3);
@@ -529,16 +544,16 @@ describe('memory-gate ops completion', () => {
     // Same for a delete: unlinked, then applied only once the directory fsync succeeds.
     dirFailuresLeft = 1;
     await enqueueMemoryOp(free('f2', 'notes.md', 'delete', null));
-    await completePendingOps(deps);
+    await tick();
     expect(fs.existsSync(path.join(memoryRoot, 'notes.md'))).toBe(false);
     expect(await getMemoryOp(GROUP, 'f2')).toMatchObject({ status: 'prepared', attempts: 1 });
-    await completePendingOps(deps);
+    await tick();
     expect(await getMemoryOp(GROUP, 'f2')).toMatchObject({ status: 'applied', after_sha256: 'absent' });
     // The delete: one failed fsync after the unlink, one successful fsync on recovery.
     expect(dirFsyncs).toBe(5);
     // A clean write fsyncs the directory once, after the rename and before applied.
     await enqueueMemoryOp(free('f3', 'notes.md', 'replace', 'again'));
-    await completePendingOps(deps);
+    await tick();
     expect(await getMemoryOp(GROUP, 'f3')).toMatchObject({ status: 'applied', attempts: 1 });
     expect(dirFsyncs).toBe(6);
   });
@@ -578,8 +593,13 @@ describe('memory-gate ops completion', () => {
       return realRename(from, to);
     });
     let failDirFsync = false;
+    let dirFsyncsThisTick = 0;
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
-      if (failDirFsync && fs.fstatSync(fd).isDirectory()) throw new Error('EIO: injected directory fsync failure');
+      if (fs.fstatSync(fd).isDirectory()) {
+        dirFsyncsThisTick += 1;
+        // The preflight's three directory fsyncs per tick succeed; the mutation's own fails.
+        if (failDirFsync && dirFsyncsThisTick > 3) throw new Error('EIO: injected directory fsync failure');
+      }
       return realFsync(fd);
     });
 
@@ -590,6 +610,7 @@ describe('memory-gate ops completion', () => {
 
     // Tenth attempt: the rename succeeds, the directory fsync fails.
     failDirFsync = true;
+    dirFsyncsThisTick = 0;
     await completePendingOps(deps);
     failDirFsync = false;
     const afterTenth = (await getMemoryOp(GROUP, 'x1'))!;
@@ -646,6 +667,41 @@ describe('memory-gate ops completion', () => {
     await enqueueMemoryOp(free('after-restart', 'notes.md', 'append', 'third'));
     const last = (await getMemoryOp(GROUP, 'after-restart'))!;
     expect(last.seq).toBeGreaterThan(rows[1]!.seq);
+  });
+
+  it('a never-spawned group: the scaffolded memory root is made durable before any op is applied', async () => {
+    fs.rmSync(memoryRoot, { recursive: true, force: true });
+    const groupDir = path.join(GROUPS_ROOT, FOLDER);
+    const groupIno = fs.statSync(groupDir).ino;
+    const realFsync = fs.fsyncSync;
+    let failGroupDirFsync = true;
+    const syncedInos = new Set<number>();
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      const st = fs.fstatSync(fd);
+      if (st.isDirectory()) {
+        if (failGroupDirFsync && st.ino === groupIno) throw new Error('EIO: injected group directory fsync failure');
+        syncedInos.add(st.ino);
+      }
+      return realFsync(fd);
+    });
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    await enqueueMemoryOp(free('n1', 'notes.md', 'replace', 'first write ever'));
+    await completePendingOps(deps);
+    // The group directory could not be made durable: nothing is applied, the op waits.
+    expect(await getMemoryOp(GROUP, 'n1')).toMatchObject({ status: 'queued', attempts: 0 });
+    expect(fs.existsSync(path.join(memoryRoot, 'notes.md'))).toBe(false);
+    expect(errorSpy.mock.calls.some((c) => String(c[0]).includes('group completion failed'))).toBe(true);
+
+    failGroupDirFsync = false;
+    await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'n1')).toMatchObject({ status: 'applied' });
+    expect(read('notes.md')).toBe('first write ever');
+    // The scaffold synced memory/ (and system/) and the group directory that now lists memory/.
+    expect(syncedInos.has(fs.statSync(memoryRoot).ino)).toBe(true);
+    expect(syncedInos.has(fs.statSync(path.join(memoryRoot, 'system')).ino)).toBe(true);
+    expect(syncedInos.has(groupIno)).toBe(true);
+    expect(fs.existsSync(path.join(memoryRoot, OWNER_STATEMENTS_PATH))).toBe(true);
   });
 
   it('appends after a missing trailing newline, replaces, and deletes, one file per op', async () => {

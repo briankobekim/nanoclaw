@@ -73,11 +73,26 @@ function lstatOrNull(p: string): fs.Stats | null {
  * braces). Throws EEXIST when anything is already there, so callers only ever
  * create — never overwrite.
  */
-export function createFileNoFollow(p: string, content: string): void {
+export function createFileNoFollow(p: string, content: string | Buffer): void {
   const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
   const fd = fs.openSync(p, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
   try {
     fs.writeFileSync(fd, content);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Make a directory's entries durable. A new directory or file lives in its
+ * parent's metadata until that parent is fsynced; without this a crash could
+ * lose a freshly scaffolded `memory/` after the ledger already relied on it.
+ */
+function fsyncDirectory(dir: string): void {
+  const fd = fs.openSync(dir, fs.constants.O_RDONLY);
+  try {
+    fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
@@ -160,14 +175,19 @@ export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = 
 
   // Scaffold what is missing. Every creation is exclusive and non-following;
   // an entry that appeared since the walk surfaces as EEXIST, never a rewrite.
-  if (systemStat === null) {
+  // Every created file is fsynced, then system/, memory/ and the group
+  // directory are fsynced bottom-up on EVERY run (a previous run may have
+  // created them and crashed or failed before its own fsync), so the tree is
+  // durable before any op can be applied against it.
+  const createdSystem = systemStat === null;
+  if (createdSystem) {
     fs.mkdirSync(systemDir);
   }
   for (const rel of TEMPLATE_FILES) {
     const destination = path.join(memoryPath, rel);
     assertRealDirectory(path.dirname(destination));
     try {
-      fs.copyFileSync(path.join(TEMPLATES_DIR, rel), destination, fs.constants.COPYFILE_EXCL);
+      createFileNoFollow(destination, fs.readFileSync(path.join(TEMPLATES_DIR, rel)));
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
@@ -176,6 +196,9 @@ export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = 
     assertRealDirectory(memoryPath);
     createFileNoFollow(ownerStatements, OWNER_STATEMENTS_FRONTMATTER);
   }
+  fsyncDirectory(systemDir);
+  fsyncDirectory(memoryPath);
+  fsyncDirectory(groupDir);
 
   return realMemory;
 }
