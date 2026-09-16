@@ -179,7 +179,7 @@ describe('composeSessionSpec', () => {
           {
             class: 'allowlisted-extra',
             hostPath: '/tmp/stub',
-            containerPath: '/workspace',
+            containerPath: '/workspace/shared',
             mode: 'ro',
             groupScope: 'agent-1',
           },
@@ -194,9 +194,28 @@ describe('composeSessionSpec', () => {
       },
     });
     const targets = spec.containers[0].mounts.map((m) => m.containerPath);
-    expect(targets.filter((t) => t === '/workspace')).toHaveLength(1);
-    expect(spec.containers[0].mounts.find((m) => m.containerPath === '/workspace')?.hostPath).toBe('/tmp/stub');
+    expect(targets.filter((t) => t === '/workspace/shared')).toHaveLength(1);
+    expect(spec.containers[0].mounts.find((m) => m.containerPath === '/workspace/shared')?.hostPath).toBe('/tmp/stub');
     expect(targets).toContain('/tmp/onecli-ca.pem');
+  });
+
+  it('REFUSES a gateway mount that replaces /workspace or /workspace/agent and would hide the memory overlay', () => {
+    // A contributed mount on either ancestor is merged in place of the composed
+    // one and therefore lands AFTER the read-only memory overlay. Docker
+    // resolves the later parent over the earlier child, so the agent's memory
+    // would come from the contributed source instead of the group's protected
+    // memory root. Composition refuses rather than spawning that container.
+    for (const containerPath of ['/workspace', '/workspace/agent']) {
+      expect(() =>
+        compose({
+          gateway: {
+            mounts: [
+              { class: 'allowlisted-extra', hostPath: '/tmp/stub', containerPath, mode: 'ro', groupScope: 'agent-1' },
+            ],
+          },
+        }),
+      ).toThrow(/memory overlay/);
+    }
   });
 
   it('gateway containers ride beside the agent', () => {

@@ -277,6 +277,40 @@ describe('M3 the standard mount set spawns', () => {
     expect(() => assertNoWritableMemoryAlias(mounts, listProtectedMemoryRoots(f.groupsDir))).toThrow(MemoryMountError);
   });
 
+  it('fails when a read-only ancestor is appended AFTER the overlay and would hide it', () => {
+    // Docker resolves a later parent mount over an earlier child, so a
+    // contributed read-only /workspace/agent placed after the overlay makes
+    // /workspace/agent/memory come from that source, not the protected root.
+    const f = fixture();
+    const roots = listProtectedMemoryRoots(f.groupsDir);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-shadow-'));
+
+    const afterAgent: VolumeMount[] = [
+      ...standardMounts(f),
+      { hostPath: elsewhere, containerPath: '/workspace/agent', readonly: true, mountClass: 'allowlisted-extra', scope },
+    ];
+    expect(() => assertNoWritableMemoryAlias(afterAgent, roots)).toThrow(MemoryMountError);
+    expect(() => assertNoWritableMemoryAlias(afterAgent, roots)).toThrow(/must come after/);
+
+    const afterWorkspace: VolumeMount[] = [
+      ...standardMounts(f),
+      { hostPath: elsewhere, containerPath: '/workspace', readonly: true, mountClass: 'allowlisted-extra', scope },
+    ];
+    expect(() => assertNoWritableMemoryAlias(afterWorkspace, roots)).toThrow(MemoryMountError);
+
+    // The same read-only mount BEFORE the overlay is harmless: the overlay still wins.
+    const beforeOverlay = standardMounts(f);
+    const overlayIndex = beforeOverlay.findIndex((m) => m.containerPath === MEMORY_CONTAINER_PATH);
+    beforeOverlay.splice(overlayIndex, 0, {
+      hostPath: elsewhere,
+      containerPath: '/workspace/agent',
+      readonly: true,
+      mountClass: 'allowlisted-extra',
+      scope,
+    });
+    expect(() => assertNoWritableMemoryAlias(beforeOverlay, roots)).not.toThrow();
+  });
+
   it('fails when the overlay is writable, and when it is duplicated', () => {
     const f = fixture();
     const roots = listProtectedMemoryRoots(f.groupsDir);

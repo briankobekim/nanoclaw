@@ -115,8 +115,9 @@ function describeMount(mount: VolumeMount): string {
 /**
  * Throws `MemoryMountError` if any writable mount aliases a protected memory
  * root by source or the memory path by destination, or if the read-only
- * memory overlay is missing, writable, duplicated, or ordered before either
- * of the two ancestors it shadows. Pass `requireOverlay: false` for a list
+ * memory overlay is missing, writable, duplicated, or ordered before ANY
+ * mount at either of the two ancestors it shadows (read-only ancestors
+ * included: a later parent mount hides the earlier child overlay). Pass `requireOverlay: false` for a list
  * assembled elsewhere (the post-gateway merge in composeSessionSpec) where
  * buildMounts has already proven the overlay and only aliasing can change.
  */
@@ -136,16 +137,19 @@ export function assertNoWritableMemoryAlias(
   mounts.forEach((mount, index) => {
     const destination = normalizeContainerPath(mount.containerPath);
     if (destination === MEMORY_CONTAINER_PATH) overlayIndices.push(index);
-    // Only a WRITABLE ancestor can expose memory by shadowing the overlay; a
-    // read-only replacement appended later cannot write, so it does not
-    // constrain the ordering (the composed-spec tests shadow /workspace read-only).
+    // EVERY ancestor mount constrains the ordering, read-only ones included:
+    // Docker resolves a later parent over an earlier child, so a read-only
+    // `/workspace/agent` appended after the overlay would make
+    // `/workspace/agent/memory` come from THAT source instead of the group's
+    // protected memory root — an alternate durable-memory view that the
+    // overlay no longer covers. Writability of the ancestor is irrelevant.
     if (destination === '/workspace') {
       hasWorkspace = true;
-      if (mount.readonly === false) lastWorkspace = index;
+      lastWorkspace = index;
     }
     if (destination === '/workspace/agent') {
       hasAgent = true;
-      if (mount.readonly === false) lastAgent = index;
+      lastAgent = index;
     }
 
     if (mount.readonly !== false) return;
