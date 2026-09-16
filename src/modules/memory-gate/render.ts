@@ -34,10 +34,13 @@ const BACKSLASH = 0x5c;
  * control (Cc, except \n and \t), format (Cf: bidi controls, zero-width
  * characters, soft hyphen, U+061C, ...), surrogate (Cs), private-use (Co),
  * unassigned (Cn) and line/paragraph separator (Zl, Zp) code point is shown
- * as a visible escape, plus the backtick, the wrap marker, and anything
- * outside the BMP.
+ * as a visible escape, and so is every Default_Ignorable_Code_Point (the
+ * combining grapheme joiner, variation selectors, Hangul fillers, ...: marks
+ * with no glyph of their own that would let two different payloads look the
+ * same on the card), plus the backtick, the wrap marker, and anything outside
+ * the BMP.
  */
-const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
+const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
 function escapedAsHex(cp: number): boolean {
   if (cp === 0x0a || cp === 0x09) return false; // newline and tab stay literal
   if (cp === 0x60) return true; // backtick

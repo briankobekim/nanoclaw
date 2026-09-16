@@ -147,7 +147,27 @@ describe('memory-gate render', () => {
 describe('fourth-review correction: every invisible code point is escaped', () => {
   it('escapes Cf/Cc/Zl/Zp characters beyond the original list and refuses lone surrogates upstream', async () => {
     const { encodeVisible, decodeVisible } = await import('./render.js');
-    const samples = ['\u061C', '\u00AD', '\u2028', '\u2029', '\u200E', '\u180E', '\u0085', '\uFFF9'];
+    const samples = [
+      '\u061C',
+      '\u00AD',
+      '\u2028',
+      '\u2029',
+      '\u200E',
+      '\u180E',
+      '\u0085',
+      '\uFFF9',
+      // Default-ignorable combining marks: no glyph of their own, so two payloads
+      // that differ only by them would collide on the card unless escaped.
+      '\u034F', // COMBINING GRAPHEME JOINER
+      '\uFE0F', // VARIATION SELECTOR-16
+      '\uFE00', // VARIATION SELECTOR-1
+      '\u1160', // HANGUL JUNGSEONG FILLER
+      '\u3164', // HANGUL FILLER
+    ];
+    // A visible combining accent is NOT escaped: it changes what the owner sees.
+    expect(encodeVisible('e\u0301')).toBe('e\u0301');
+    expect(encodeVisible('a\u034Fb\uFE0Fc')).toBe('a\\u{34F}b\\u{FE0F}c');
+    expect(encodeVisible('ab')).not.toBe(encodeVisible('a\u034Fb'));
     for (const s of samples) {
       const encoded = encodeVisible(`a${s}b`);
       expect(encoded).toMatch(/^a\\u\{[0-9A-F]+\}b$/);

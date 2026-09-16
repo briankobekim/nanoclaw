@@ -488,15 +488,15 @@ describe('memory-gate ops completion', () => {
   });
 
   it('a rename or unlink is marked applied only after the directory is durable', async () => {
-    // The temp file's own fsync succeeds; the directory fsync (a directory fd) fails once.
+    // The temp file's own fsync succeeds; the directory fsync (a directory fd) fails a set number of times.
     const realFsync = fs.fsyncSync;
-    let failDirOnce = true;
+    let dirFailuresLeft = 2;
     let dirFsyncs = 0;
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
       if (fs.fstatSync(fd).isDirectory()) {
         dirFsyncs += 1;
-        if (failDirOnce) {
-          failDirOnce = false;
+        if (dirFailuresLeft > 0) {
+          dirFailuresLeft -= 1;
           throw new Error('EIO: injected directory fsync failure');
         }
       }
@@ -512,27 +512,35 @@ describe('memory-gate ops completion', () => {
     expect((await getMemoryOp(GROUP, 'f1'))!.last_error).toContain('injected directory fsync');
     expect(tmpFiles()).toEqual([]);
 
-    // Next tick: the file already holds after_sha256, so it is applied without a second write.
+    // Next tick: the file already holds after_sha256, but the directory fsync is
+    // RETRIED before applied; it fails again, so the row stays prepared (no rewrite).
+    await completePendingOps(deps);
+    expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'prepared', attempts: 1 });
+    expect((await getMemoryOp(GROUP, 'f1'))!.last_error).toContain('directory fsync failed');
+    expect(renameSpy).toHaveBeenCalledTimes(1);
+    expect(dirFsyncs).toBe(2);
+    // Third tick: the directory fsync succeeds and only then is the op applied.
     await completePendingOps(deps);
     expect(await getMemoryOp(GROUP, 'f1')).toMatchObject({ status: 'applied', attempts: 1 });
     expect(renameSpy).toHaveBeenCalledTimes(1);
+    expect(dirFsyncs).toBe(3);
     expect(agentNotices().filter((text) => text === 'memory written: notes.md')).toHaveLength(1);
 
     // Same for a delete: unlinked, then applied only once the directory fsync succeeds.
-    failDirOnce = true;
+    dirFailuresLeft = 1;
     await enqueueMemoryOp(free('f2', 'notes.md', 'delete', null));
     await completePendingOps(deps);
     expect(fs.existsSync(path.join(memoryRoot, 'notes.md'))).toBe(false);
     expect(await getMemoryOp(GROUP, 'f2')).toMatchObject({ status: 'prepared', attempts: 1 });
     await completePendingOps(deps);
     expect(await getMemoryOp(GROUP, 'f2')).toMatchObject({ status: 'applied', after_sha256: 'absent' });
-    // A tick that finds the file already at after_sha256 does not mutate, so no fsync ran there.
-    expect(dirFsyncs).toBe(2);
+    // The delete: one failed fsync after the unlink, one successful fsync on recovery.
+    expect(dirFsyncs).toBe(5);
     // A clean write fsyncs the directory once, after the rename and before applied.
     await enqueueMemoryOp(free('f3', 'notes.md', 'replace', 'again'));
     await completePendingOps(deps);
     expect(await getMemoryOp(GROUP, 'f3')).toMatchObject({ status: 'applied', attempts: 1 });
-    expect(dirFsyncs).toBe(3);
+    expect(dirFsyncs).toBe(6);
   });
 
   it('an approved path must be spelled on disk exactly as approved, so a case-folding filesystem cannot redirect it', async () => {

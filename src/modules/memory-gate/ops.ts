@@ -447,7 +447,17 @@ async function completeOne(op: MemoryOpRow, memoryRoot: string, deps: Completion
 
   if (op.status === 'prepared') {
     if (op.after_sha256 !== null && current === op.after_sha256) {
-      // A previous attempt already mutated (a completed delete included).
+      // A previous attempt already mutated (a completed delete included) but
+      // may have failed its directory fsync: make the directory entry durable
+      // BEFORE the ledger says applied. A failure keeps the row prepared and
+      // never abandons it; nothing is written again.
+      try {
+        fsyncDirectory(path.dirname(target.abs));
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed fsync is one retried attempt; the file is already in its planned state
+      } catch (err) {
+        await failAttempt(op, op.attempts, new MutatedNotDurableError(err), deps, { mutated: true });
+        return;
+      }
       await markApplied(op, op.attempts, deps);
       return;
     }
