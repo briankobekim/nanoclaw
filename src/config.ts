@@ -19,6 +19,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'NANOCLAW_DIGEST_HOUR',
 ]);
 
 /**
@@ -107,3 +108,15 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// Local hour (0-23) after which the nightly usage digest goes to every owner,
+// or `off` to silence it (docs/specs/usage-digest/plan.md §4.4). Anything else
+// falls back to the default of 21:00.
+function resolveDigestHour(): number | 'off' {
+  const raw = (process.env.NANOCLAW_DIGEST_HOUR || envConfig.NANOCLAW_DIGEST_HOUR || '').trim();
+  if (raw === '') return 21;
+  if (raw.toLowerCase() === 'off') return 'off';
+  const hour = Number(raw);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 21;
+}
+export const DIGEST_HOUR: number | 'off' = resolveDigestHour();

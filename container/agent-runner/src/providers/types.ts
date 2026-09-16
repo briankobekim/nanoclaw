@@ -154,6 +154,36 @@ export interface AgentQuery {
   abort(): void;
 }
 
+/**
+ * Per-turn usage as reported by the provider's SDK on its terminal `result`
+ * message (docs/specs/usage-digest/plan.md §4.1). Token fields are
+ * non-negative integers; an SDK field that is absent becomes 0. `cost_usd`
+ * is null only when the SDK reports no cost at all — never a silent $0.
+ * `sdk_result_id` is the SDK's result uuid (or a fresh random id when the
+ * SDK gives none) and becomes the host's dedupe key for the turn.
+ */
+export interface TurnUsage {
+  cost_usd: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  model_usage: Record<
+    string,
+    {
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+      cost_usd: number | null;
+    }
+  >;
+  duration_ms: number;
+  duration_api_ms: number;
+  num_turns: number;
+  sdk_result_id: string;
+}
+
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
   /**
@@ -161,8 +191,12 @@ export type ProviderEvent =
    * turn as an error (e.g. a non-retryable Anthropic 403 billing_error). The
    * poll-loop uses it to surface the result text to the user instead of
    * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
+   * `usage` is present when the provider can report the turn's token/cost
+   * usage (Claude: on success AND every error subtype); providers with no
+   * usage source (Codex) leave it undefined and the turn is recorded as
+   * unreported.
    */
-  | { type: 'result'; text: string | null; isError?: boolean }
+  | { type: 'result'; text: string | null; isError?: boolean; usage?: TurnUsage }
   /**
    * An assistant text segment emitted mid-turn (e.g. between tool calls).
    * The SDK's final `result` carries only the LAST assistant text, so a

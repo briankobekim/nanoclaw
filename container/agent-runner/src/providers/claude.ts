@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -16,10 +17,62 @@ import type {
   ProviderEvent,
   ProviderOptions,
   QueryInput,
+  TurnUsage,
 } from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
+}
+
+/** A non-negative integer token/duration count; anything else (absent, NaN, negative) is 0. */
+function nonNegInt(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+/** A finite cost, or null when the SDK reports none — never a silent $0. */
+function costOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Map an SDK `result` message (success or any error subtype — both carry the
+ * same usage fields, docs/SDK_DEEP_DIVE.md ~L245) to the provider-neutral
+ * `TurnUsage`. The per-model block is `modelUsage` keyed by model id with
+ * camelCase fields (`inputTokens`, `cacheReadInputTokens`, `costUSD`, …);
+ * snake_case spellings are accepted defensively so an SDK rename cannot
+ * silently zero the digest.
+ */
+export function toTurnUsage(message: Record<string, unknown>): TurnUsage {
+  const usage = message.usage && typeof message.usage === 'object' ? (message.usage as Record<string, unknown>) : {};
+  const modelUsage: TurnUsage['model_usage'] = {};
+  const rawModels = message.modelUsage ?? message.model_usage;
+  if (rawModels && typeof rawModels === 'object' && !Array.isArray(rawModels)) {
+    for (const [model, entry] of Object.entries(rawModels as Record<string, unknown>)) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, unknown>;
+      modelUsage[model] = {
+        input_tokens: nonNegInt(e.inputTokens ?? e.input_tokens),
+        output_tokens: nonNegInt(e.outputTokens ?? e.output_tokens),
+        cache_read_tokens: nonNegInt(e.cacheReadInputTokens ?? e.cache_read_input_tokens ?? e.cache_read_tokens),
+        cache_creation_tokens: nonNegInt(
+          e.cacheCreationInputTokens ?? e.cache_creation_input_tokens ?? e.cache_creation_tokens,
+        ),
+        cost_usd: costOrNull(e.costUSD ?? e.cost_usd),
+      };
+    }
+  }
+  return {
+    cost_usd: costOrNull(message.total_cost_usd),
+    input_tokens: nonNegInt(usage.input_tokens),
+    output_tokens: nonNegInt(usage.output_tokens),
+    cache_read_tokens: nonNegInt(usage.cache_read_input_tokens),
+    cache_creation_tokens: nonNegInt(usage.cache_creation_input_tokens),
+    model_usage: modelUsage,
+    duration_ms: nonNegInt(message.duration_ms),
+    duration_api_ms: nonNegInt(message.duration_api_ms),
+    num_turns: nonNegInt(message.num_turns),
+    sdk_result_id: typeof message.uuid === 'string' && message.uuid.length > 0 ? message.uuid : randomUUID(),
+  };
 }
 
 export interface SdkRateLimitInfo {
@@ -628,7 +681,10 @@ export class ClaudeProvider implements AgentProvider {
           // billing/quota notice to the user rather than dropping the turn.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true };
+          // Usage rides on every result subtype — an error turn still spent
+          // tokens, and the host digest counts it (usage-digest plan §4.1).
+          const usage = toTurnUsage(message as unknown as Record<string, unknown>);
+          yield { type: 'result', text, isError: m.is_error === true, usage };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {

@@ -35,3 +35,4 @@ import './verifier/index.js';
 // Memory provenance gate: registers the memory_write door and its approval
 // handler; depends on approvals, permissions, and delivery being loaded.
 import './memory-gate/index.js';
+import './usage/index.js';

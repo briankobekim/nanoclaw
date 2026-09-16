@@ -176,6 +176,19 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:memory-gate-ops-sweep:end
 
+  // Send every owner the nightly usage digest once per local day after the
+  // configured hour. Central-DB scan, once per tick; never wakes a container
+  // or writes to an agent inbox; the per-owner marker lives in
+  // usage_digest_deliveries.
+  // MODULE-HOOK:usage-digest:start
+  try {
+    const { usageDigestSweep } = await import('./modules/usage/digest.js');
+    await usageDigestSweep();
+  } catch (err) {
+    log.error('Usage digest sweep failed', { err });
+  }
+  // MODULE-HOOK:usage-digest:end
+
   setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
 }
 

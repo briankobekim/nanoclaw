@@ -280,6 +280,16 @@ export async function getPendingApprovalsByAction(action: string): Promise<Pendi
 }
 
 /**
+ * Approvals still open for a human, oldest first: `pending` (card showing) and
+ * `approved` (clicked, replay not yet finished). Read by the usage digest.
+ */
+export async function listPendingApprovalsOpen(): Promise<PendingApproval[]> {
+  return getDb().all<PendingApproval>(
+    "SELECT * FROM pending_approvals WHERE status IN ('pending', 'approved') ORDER BY created_at ASC, approval_id ASC",
+  );
+}
+
+/**
  * Resolve ask_question render metadata for any card. Approval-backed rows
  * include the original question body so the bridge can retain it when the
  * card resolves; generic pending_questions intentionally keep their existing

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -29,7 +31,7 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange, TurnUsage } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -43,6 +45,37 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * The ONE recording path for a finished turn (usage-digest plan §4.1): one
+ * `kind:'system'` outbound row per turn, consumed host-side by the
+ * `record_usage` delivery action and never forwarded to a channel adapter.
+ *
+ * Called (a) on every `result` event — BEFORE `markCompleted` and before any
+ * reply, so a crash after the write re-runs the batch as a genuine second
+ * turn with its own row — and (b) from the terminal provider-failure path
+ * when a turn ends with an exception and no `result` (the Codex shape; a
+ * thrown Claude SDK error likewise), with `isError:true` and no usage.
+ *
+ * `turn_id` is the SDK's result id when usage is present (the host's dedupe
+ * key across delivery retries), otherwise a fresh random id. `reported` is
+ * true only when usage is present: a Codex turn is counted, never $0.00.
+ */
+export async function recordTurn(args: { usage?: TurnUsage; isError: boolean }): Promise<void> {
+  const { usage, isError } = args;
+  await writeMessageOut({
+    id: generateId(),
+    kind: 'system',
+    content: JSON.stringify({
+      action: 'record_usage',
+      turn_id: usage?.sdk_result_id ?? randomUUID(),
+      reported: usage !== undefined,
+      is_error: isError,
+      occurred_at: new Date().toISOString(),
+      ...(usage ? { usage } : {}),
+    }),
+  });
 }
 
 export interface PollLoopConfig {
@@ -395,6 +428,13 @@ export async function processQuery(
   // the same prompt again. Unused (and unmaintained) when the provider
   // doesn't implement `onExchangeComplete`.
   const archivePrompts: string[] = [initialPrompt];
+  // Exactly-one-record-per-turn guard for recordTurn. True while a prompt is
+  // in flight without a `result` yet: set at the start, cleared by the
+  // result-branch record, set again by every push (follow-up batch, wrap or
+  // task-block nudge) that opens a new turn. The failure path records only
+  // when a turn is still pending, so a stream that dies AFTER its result
+  // never yields a second row for the same turn.
+  let turnPending = true;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -485,6 +525,7 @@ export async function processQuery(
         unwrappedNudged = false;
         taskBlockNudged = false;
         query.push(prompt);
+        turnPending = true;
         archivePrompts.push(prompt);
         markCompleted(keptIds);
       } catch (err) {
@@ -553,6 +594,11 @@ export async function processQuery(
         // follow-up pushes. The agent may have responded via MCP
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
+        //
+        // Record the turn FIRST (usage-digest plan §4.1 ordering): the row
+        // must exist before the batch is acked and before any reply goes out.
+        await recordTurn({ usage: event.usage, isError: event.isError === true });
+        turnPending = false;
         markCompleted(initialBatchIds);
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
@@ -614,6 +660,7 @@ export async function processQuery(
                   `Your destinations: ${names}. ` +
                   `Please re-send your response with the correct wrapping.</system>`,
               );
+              turnPending = true;
             }
             if (willRetryTaskBlocks) {
               taskBlockNudged = true;
@@ -621,6 +668,7 @@ export async function processQuery(
                 .map((d) => d.name)
                 .join(', ');
               query.push(buildTaskBlockNudge(taskBlocks, names));
+              turnPending = true;
             }
             // A retry result (wrapping or task-block nudge) answers the SAME
             // user prompt — keep it queued so the retry archives against it,
@@ -644,6 +692,20 @@ export async function processQuery(
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    // Terminal provider failure with no `result` for the in-flight turn (the
+    // Codex provider yields an error event and throws; a Claude SDK exception
+    // lands here too). The turn still ran — record it as an unreported error
+    // turn. Guarded by turnPending so a stream that dies after its result
+    // never double-records. A failed record write must not mask the
+    // provider error that is about to be rethrown.
+    if (turnPending) {
+      turnPending = false;
+      try {
+        await recordTurn({ isError: true });
+      } catch (recordErr) {
+        log(`record_usage write failed: ${recordErr instanceof Error ? recordErr.message : String(recordErr)}`);
+      }
+    }
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
       result: `Error: ${errMsg}`,
