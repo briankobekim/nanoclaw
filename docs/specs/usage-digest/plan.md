@@ -1,6 +1,6 @@
 # Usage digest: what Atlas and Echo did, what is open, what it cost
 
-Status: APPROVED. Plan revision 2 (2026-09-16, after one cross-model plan review and one correction batch; see `run.md`) approved by Brian: "Build it". Build in progress.
+Status: SHIPPED. Plan revision 2 (2026-09-16, after one cross-model plan review and one correction batch; see `run.md`) approved by Brian: "Build it". Built, reviewed once, and rolled out to the host on 2026-09-16 (commit 7479f9ce). Kept as the record of the approved contract.
 
 Executable acceptance criteria apply (behavior-changing work); the cases in §6 are materialized into the test tree by `/team-build` before any implementation.
 
