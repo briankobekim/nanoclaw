@@ -14,3 +14,8 @@
 | 4 | The mission view mapped every closed row to stage `completed`, so an abandoned handoff looked finished (medium) | Confirmed. | **Fixed** (a silent misreport to the operator): a closed row whose closure evidence carries the `abandoned by operator:` prefix is staged `abandoned`, its state reads `closed: abandoned (<reason>)`, next action `none`. Test: abandoned from `created` and from `delivered` → `abandoned`, never `completed`; an untouched sibling stays `awaiting_delivery`. |
 
 Fresh checks after the batch: `pnpm typecheck` clean; channels, approvals, permissions, interactive, memory-gate, CLI resources and host-core suites → 50 files, 441 tests passed; full suite → only the 4 pre-existing updater failures; ESLint 0 errors; build rebuilt. Review loop closed at one round by prior agreement.
+
+## Rollout (2026-09-16)
+- Host restarted onto 5aa32641 at 14:20 UTC-7 (marker stamped first; no crash loop; CLI socket up). One idle Atlas container was stopped by the restart; its session resumes on the next message.
+- The four smoke-test handoffs left open by the revision-loop and verifier builds (`RECOVERY-20260909-ATLAS-ECHO`, `…675d2d37`, `…fe7ae416`, `…b2315abc`) were closed with `ncl handoffs abandon` from the host; open handoffs now 0; `ncl missions list` shows them as `abandoned` with the recorded reason (the one that a later round superseded keeps the `superseded` stage, with the abandonment in its state column).
+- Live check still open for Brian: click any future approval card as the owner and confirm the buttons vanish only after the action lands; a click by anyone else now leaves the card untouched.
