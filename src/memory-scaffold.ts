@@ -68,19 +68,25 @@ function lstatOrNull(p: string): fs.Stats | null {
   }
 }
 
-/** Scaffold temp files live in the group directory (outside `memory/`), named so a leftover is recognizable. */
+/**
+ * Scaffold temp files live at the root of `memory/` itself: that tree is
+ * mounted read-only into every container, so a temp (or a leftover one) can
+ * never be a container-writable alias of an installed file. The group
+ * directory would be the wrong place: it is mounted read-write.
+ */
 const SCAFFOLD_TEMP_PREFIX = '.memory-scaffold-';
 const SCAFFOLD_TEMP_RE = /^\.memory-scaffold-[0-9a-f]{16}\.tmp$/;
 
 /**
  * Create `p` with `content` so that the destination is either fully written
  * and fsynced or absent, never a short or unsynced file: the bytes go to an
- * exclusive temp file in `tempDir`, are fsynced there, and are then installed
- * with `link` (which fails with EEXIST when anything, a symlink included, is
- * already at `p`: callers only ever create, never overwrite or follow). The
- * temp name is removed whatever happens; if that last unlink fails after a
- * successful install the file briefly has two names, which the next preflight
- * heals by inode (see `healScaffoldTemps`).
+ * exclusive temp file in `tempDir` (the memory root), are fsynced there, and
+ * are then installed with `link` (which fails with EEXIST when anything, a
+ * symlink included, is already at `p`: callers only ever create, never
+ * overwrite or follow). After the install the temp name MUST go and the
+ * destination must have exactly one name; otherwise this throws so that no
+ * spawn or completion proceeds, and the next preflight heals the two-name
+ * state by inode (see `healScaffoldTemps`).
  */
 export function createFileNoFollow(p: string, content: string | Buffer, tempDir: string): void {
   const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
@@ -102,37 +108,35 @@ export function createFileNoFollow(p: string, content: string | Buffer, tempDir:
         log.warn('memory scaffold: close failed after a failed write', { path: tmp, err: closeErr });
       }
     }
-    throw err;
-  } finally {
     try {
       fs.unlinkSync(tmp);
-      // eslint-disable-next-line no-catch-all/no-catch-all -- a leftover temp is inert (outside memory/) and healed or ignored by the next preflight
+      // eslint-disable-next-line no-catch-all/no-catch-all -- nothing was installed; a leftover temp under the read-only overlay is inert
     } catch (cleanupErr) {
       log.warn('memory scaffold: could not remove a temp file', { path: tmp, err: cleanupErr });
     }
+    throw err;
   }
+  // Installed. The second name must disappear before anyone may rely on the tree.
+  fs.unlinkSync(tmp);
+  const names = fs.lstatSync(p).nlink;
+  if (names !== 1) throw new Error(`scaffold file has ${names} names after install: ${p}`);
 }
 
 /**
  * A crash or failed unlink between `link` and the temp's removal leaves a
  * scaffold file with two names; the walk would refuse it as hard-linked.
  * Remove only a temp that is PROVEN ours: same device and inode as one of
- * the files this scaffold installs. Any other leftover is left alone.
+ * the files this scaffold installs. Any other leftover is left alone. A
+ * failure here propagates: the tree is not accepted until it is healed.
  */
-function healScaffoldTemps(groupDir: string, memoryPath: string): void {
-  let names: string[];
-  try {
-    names = fs.readdirSync(groupDir).filter((name) => SCAFFOLD_TEMP_RE.test(name));
-    // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable group dir is reported by the checks that follow
-  } catch {
-    return;
-  }
+function healScaffoldTemps(memoryPath: string): void {
+  const names = fs.readdirSync(memoryPath).filter((name) => SCAFFOLD_TEMP_RE.test(name));
   if (names.length === 0) return;
   const installed = [...TEMPLATE_FILES, 'owner-statements.md']
     .map((rel) => lstatOrNull(path.join(memoryPath, rel)))
     .filter((st): st is fs.Stats => st !== null && st.isFile());
   for (const name of names) {
-    const tmp = path.join(groupDir, name);
+    const tmp = path.join(memoryPath, name);
     const st = lstatOrNull(tmp);
     if (!st || !st.isFile() || st.nlink < 2) continue;
     if (!installed.some((target) => target.ino === st.ino && target.dev === st.dev)) continue;
@@ -140,6 +144,9 @@ function healScaffoldTemps(groupDir: string, memoryPath: string): void {
     fs.unlinkSync(tmp);
   }
 }
+
+/** One preflight per group at a time, so two concurrent runs never scaffold the same tree side by side. */
+const preflightChains = new Map<string, Promise<unknown>>();
 
 /**
  * Make a directory's entries durable. A new directory or file lives in its
@@ -168,6 +175,21 @@ function assertRealDirectory(p: string): void {
  * rejects with `MemoryPreflightError` after logging and one owner notice.
  */
 export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = logOnlyDeps): Promise<string> {
+  const key = path.resolve(groupDir);
+  const previous = preflightChains.get(key) ?? Promise.resolve();
+  const run = previous.then(
+    () => prepareMemoryRootSerialized(groupDir, deps),
+    () => prepareMemoryRootSerialized(groupDir, deps),
+  );
+  preflightChains.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (preflightChains.get(key) === run) preflightChains.delete(key);
+  }
+}
+
+async function prepareMemoryRootSerialized(groupDir: string, deps: PreflightDeps): Promise<string> {
   const memoryPath = path.join(groupDir, 'memory');
 
   const refuse = async (reason: string, p: string): Promise<never> => {
@@ -195,7 +217,7 @@ export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = 
     return refuse(`memory root resolves outside the group directory (${realGroupDir})`, memoryPath);
   }
 
-  healScaffoldTemps(groupDir, memoryPath);
+  healScaffoldTemps(memoryPath);
 
   // The two fixed entries have fixed types when present.
   const systemDir = path.join(memoryPath, 'system');
@@ -250,14 +272,14 @@ export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = 
     if (lstatOrNull(destination) !== null) continue;
     assertRealDirectory(path.dirname(destination));
     try {
-      createFileNoFollow(destination, fs.readFileSync(path.join(TEMPLATES_DIR, rel)), groupDir);
+      createFileNoFollow(destination, fs.readFileSync(path.join(TEMPLATES_DIR, rel)), memoryPath);
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
   }
   if (ownerStat === null) {
     assertRealDirectory(memoryPath);
-    createFileNoFollow(ownerStatements, OWNER_STATEMENTS_FRONTMATTER, groupDir);
+    createFileNoFollow(ownerStatements, OWNER_STATEMENTS_FRONTMATTER, memoryPath);
   }
   fsyncDirectory(systemDir);
   fsyncDirectory(memoryPath);
