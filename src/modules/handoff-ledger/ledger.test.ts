@@ -5,6 +5,7 @@ import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import {
+  abandonHandoff,
   acknowledgeHandoff,
   closeHandoff,
   createHandoff,
@@ -133,6 +134,59 @@ function revisionInput(prior: { id: string }, id = `${prior.id}-r2`) {
     supersedes: prior.id,
   };
 }
+
+describe('operator abandonment', () => {
+  it('closes a handoff from any non-closed state, records why, and leaves the fingerprint intact', async () => {
+    const created = await freshHandoff();
+    const abandoned = await abandonHandoff(created.id, 'smoke test, nobody will finish it');
+    expect(abandoned.status).toBe('closed');
+    expect(abandoned.closed_at).not.toBeNull();
+    expect(abandoned.closure_evidence).toBe('abandoned by operator: smoke test, nobody will finish it');
+    expect(abandoned.fingerprint).toBe(created.fingerprint);
+    expect(fingerprintOfRow(abandoned)).toBe(created.fingerprint);
+    const events = await listHandoffEvents(created.id);
+    const last = events[events.length - 1]!;
+    expect(last.event_type).toBe('abandoned');
+    expect(last.actor_agent_group_id).toBe('host');
+    expect(JSON.parse(last.payload_json)).toMatchObject({
+      from: 'created',
+      reason: 'smoke test, nobody will finish it',
+    });
+
+    // A delivered one too: no review, no acknowledgement required.
+    const second = await createHandoff({
+      id: 'COS-07-TEST-2',
+      sourceAgentGroupId: ATLAS,
+      reviewerAgentGroupId: ECHO,
+      project: 'none',
+      goal: 'Second',
+      outcome: 'x',
+      scope: 'x',
+      authority: 'recommend',
+    });
+    await markHandoffDelivered(second.id, ATLAS, second.fingerprint);
+    expect((await abandonHandoff(second.id, 'stale')).status).toBe('closed');
+  });
+
+  it('refuses an already-closed handoff, an empty reason, and an unknown id', async () => {
+    const h = await freshHandoff();
+    await abandonHandoff(h.id, 'once');
+    await expect(abandonHandoff(h.id, 'twice')).rejects.toThrow(/already closed/);
+    const other = await createHandoff({
+      id: 'COS-07-TEST-3',
+      sourceAgentGroupId: ATLAS,
+      reviewerAgentGroupId: ECHO,
+      project: 'none',
+      goal: 'Third',
+      outcome: 'x',
+      scope: 'x',
+      authority: 'recommend',
+    });
+    await expect(abandonHandoff(other.id, '   ')).rejects.toThrow(/reason is required/);
+    expect((await getHandoff(other.id))!.status).toBe('created');
+    await expect(abandonHandoff('nope', 'x')).rejects.toThrow(/not found/);
+  });
+});
 
 describe('handoff revisions', () => {
   it('createHandoff with supersedes links a new round to a changes_required handoff', async () => {

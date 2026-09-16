@@ -26,16 +26,18 @@ import { getResponseHandlers, type ResponsePayload } from './response-registry.j
 
 const hostAbortController = new AbortController();
 
-async function dispatchResponse(payload: ResponsePayload): Promise<void> {
+/**
+ * True when a handler claimed the response. A THROWING handler propagates:
+ * the click may not have been recorded (database down, mid-transition
+ * failure), and the bridge must then leave the card actionable rather than
+ * strip its buttons over an unrecorded tap.
+ */
+async function dispatchResponse(payload: ResponsePayload): Promise<boolean> {
   for (const handler of getResponseHandlers()) {
-    try {
-      const claimed = await handler(payload);
-      if (claimed) return;
-    } catch (err) {
-      log.error('Response handler threw', { questionId: payload.questionId, err });
-    }
+    if (await handler(payload)) return true;
   }
   log.warn('Unclaimed response', { questionId: payload.questionId, value: payload.value });
+  return false;
 }
 
 // Channel barrel — each enabled channel self-registers on import.
@@ -126,7 +128,8 @@ async function main(): Promise<void> {
         });
       },
       onAction(questionId, selectedOption, userId) {
-        dispatchResponse({
+        // Awaited by the bridge; a rejection means "not recorded" (see ChannelSetup.onAction).
+        return dispatchResponse({
           questionId,
           value: selectedOption,
           userId,
@@ -136,8 +139,6 @@ async function main(): Promise<void> {
           // pending_question / pending_approval row.
           platformId: '',
           threadId: null,
-        }).catch((err) => {
-          log.error('Failed to handle question response', { questionId, err });
         });
       },
     };

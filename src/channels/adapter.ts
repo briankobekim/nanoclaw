@@ -21,8 +21,14 @@ export interface ChannelSetup {
   /** Called when the adapter discovers metadata about a conversation. */
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 
-  /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
-  onAction(questionId: string, selectedOption: string, userId: string): void;
+  /**
+   * Called when a user clicks a button/action in a card (e.g., ask_user_question response).
+   * The bridge AWAITS this before it terminalizes the card: resolve (any value) once the
+   * click has been durably handled; resolve `false` when no handler claimed it (a stale
+   * card, which the bridge still terminalizes); THROW when the click could not be recorded,
+   * in which case the bridge leaves the card actionable so the click can be retried.
+   */
+  onAction(questionId: string, selectedOption: string, userId: string): void | Promise<boolean | void>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

@@ -655,6 +655,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const matched = render?.options.find((o) => o.value === selectedOption);
         const selectedLabel = matched?.selectedLabel ?? selectedOption ?? '(clicked)';
 
+        // Record the click BEFORE the card loses its buttons. If recording
+        // fails, the card stays actionable and the tap can simply be repeated;
+        // the alternative (buttons gone, nothing recorded) strands the approval
+        // with no sweep to revive it.
+        try {
+          await setupConfig.onAction(questionId, selectedOption, userId);
+        } catch (err) {
+          log.error('Action could not be recorded; card left actionable for a retry', { questionId, err });
+          return;
+        }
+
         // Update the card to show the selected answer, who acted, and remove buttons
         const actorName = event.user?.userName || event.user?.fullName || '';
         const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
@@ -670,8 +681,6 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
-
-        setupConfig.onAction(questionId, selectedOption, userId);
       });
 
       await chat.initialize();
@@ -991,7 +1000,21 @@ function startLocalWebhookServer(
   });
 }
 
-async function handleForwardedEvent(
+/** Discord interaction callback / follow-up (exported for tests; not part of the adapter contract). */
+async function discordInteractionCallback(
+  interactionId: string,
+  interactionToken: string,
+  type: 6 | 7,
+  data?: Record<string, unknown>,
+): Promise<void> {
+  await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data ? { type, data } : { type }),
+  });
+}
+
+export async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
@@ -1041,31 +1064,50 @@ async function handleForwardedEvent(
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
       const actorName = user?.global_name || user?.username || '';
       const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
+      const terminal = {
+        embeds: [
+          {
+            title: cardTitle,
+            description: originalDescription || render?.question || '',
+            footer: { text: resolution },
+          },
+        ],
+        components: [], // remove buttons
+      };
+
+      if (!questionId || !selectedOption) {
+        // Not one of our question cards: nothing to record, clear it as before.
+        try {
+          await discordInteractionCallback(interactionId, interactionToken, 7, terminal);
+        } catch (err) {
+          log.error('Failed to update interaction', { err });
+        }
+        return;
+      }
+
+      // Discord needs an acknowledgement within 3 s. Type 6 (DEFERRED_UPDATE_MESSAGE)
+      // acknowledges WITHOUT touching the card, so the buttons stay until the
+      // click is recorded; only then is the original message edited.
       try {
-        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-          method: 'POST',
+        await discordInteractionCallback(interactionId, interactionToken, 6);
+      } catch (err) {
+        log.warn('Failed to acknowledge interaction; continuing to record the click', { err });
+      }
+      try {
+        await setupConfig.onAction(questionId, selectedOption, user?.id || '');
+      } catch (err) {
+        log.error('Action could not be recorded; card left actionable for a retry', { questionId, err });
+        return;
+      }
+      const applicationId = interaction.application_id as string | undefined;
+      try {
+        await fetch(`https://discord.com/api/v10/webhooks/${applicationId}/${interactionToken}/messages/@original`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 7, // UPDATE_MESSAGE — acknowledge + update in one call
-            data: {
-              embeds: [
-                {
-                  title: cardTitle,
-                  description: originalDescription || render?.question || '',
-                  footer: { text: resolution },
-                },
-              ],
-              components: [], // remove buttons
-            },
-          }),
+          body: JSON.stringify(terminal),
         });
       } catch (err) {
         log.error('Failed to update interaction', { err });
-      }
-
-      // Dispatch to host
-      if (questionId && selectedOption) {
-        setupConfig.onAction(questionId, selectedOption, user?.id || '');
       }
       return;
     }

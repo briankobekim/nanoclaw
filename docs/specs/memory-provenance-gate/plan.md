@@ -1,6 +1,6 @@
 # Memory provenance gate: Brian files, agents propose
 
-Status: PROPOSED (plan revision 8, 2026-09-16, after seven cross-model review rounds and a check against external practice; see `run.md`). Approval state: **not approved**. `/team-build` may not start until Brian approves this exact revision.
+Status: SHIPPED. Plan revision 8 (2026-09-16) was approved by Brian, built through fifteen implementation review rounds, and rolled out to the host on 2026-09-16 (see `run.md`; migration `module:nanoclaw.memory-gate:ops` applied, both group trees scaffolded). One accepted risk carried: the chat-sdk bridge terminalizes an approval card before the click is durable, fixed as its own follow-up build (`docs/specs/approval-click-durability/`). Kept as the record of the approved contract.
 
 Executable acceptance criteria apply (behavior-changing work); the cases in §5 are materialized into the test tree by `/team-build` before any implementation.
 

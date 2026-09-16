@@ -1,6 +1,6 @@
 # Handoff revision loop and owner "needs you" ping
 
-Status: PROPOSED (plan revision 2, 2026-09-15, after one cross-model correction batch; see `run.md`). Approval state: **not approved**. `/team-build` may not start until Brian approves this exact revision.
+Status: SHIPPED. Plan revision 2 (2026-09-15) was approved by Brian, built, reviewed, and activated on the host on 2026-09-15 (see `run.md`; migration `module:nanoclaw.handoff-ledger:supersedes` applied 20:14 UTC). Kept as the record of the approved contract.
 
 Executable acceptance criteria apply (behavior-changing work); the cases in §5 are materialized into the test tree by `/team-build` before any implementation.
 

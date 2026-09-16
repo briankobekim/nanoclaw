@@ -1,5 +1,6 @@
 import { getDb } from '../../db/connection.js';
 import {
+  abandonHandoff,
   acknowledgeHandoff,
   closeHandoff,
   createHandoff,
@@ -158,6 +159,19 @@ registerResource({
           supersedes: stringArg(args, 'supersedes', false),
         });
       },
+    },
+    abandon: {
+      access: 'open',
+      hostOnly: true,
+      description:
+        'OPERATOR-ONLY. Close a handoff in any non-closed state without a review: test debris, a thread nobody ' +
+        'will finish. The reason is recorded as closure evidence and as an `abandoned` event; nothing else changes.',
+      args: [
+        { name: 'id', type: 'string', description: 'Handoff ID.', required: true },
+        { name: 'reason', type: 'string', description: 'Why it is being abandoned (recorded).', required: true },
+      ],
+      examples: ['ncl handoffs abandon --id handoff-123 --reason "smoke test from the revision-loop build"'],
+      handler: async (args) => abandonHandoff(stringArg(args, 'id')!, stringArg(args, 'reason')!),
     },
     deliver: {
       access: 'open',

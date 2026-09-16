@@ -287,7 +287,13 @@ describe('M3 the standard mount set spawns', () => {
 
     const afterAgent: VolumeMount[] = [
       ...standardMounts(f),
-      { hostPath: elsewhere, containerPath: '/workspace/agent', readonly: true, mountClass: 'allowlisted-extra', scope },
+      {
+        hostPath: elsewhere,
+        containerPath: '/workspace/agent',
+        readonly: true,
+        mountClass: 'allowlisted-extra',
+        scope,
+      },
     ];
     expect(() => assertNoWritableMemoryAlias(afterAgent, roots)).toThrow(MemoryMountError);
     expect(() => assertNoWritableMemoryAlias(afterAgent, roots)).toThrow(/must come after/);

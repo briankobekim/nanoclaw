@@ -501,6 +501,38 @@ export async function closeHandoff(
   );
 }
 
+/**
+ * Operator abandonment: close a handoff in ANY non-closed state without a
+ * review or acknowledgement (test debris, a superseded thread nobody will
+ * finish, a reviewer that no longer exists). Only the host may call this;
+ * the `ncl handoffs abandon` verb is host-only, so no agent can end a
+ * handoff it did not earn. Every immutable field, and so the fingerprint,
+ * is untouched; the reason is recorded as closure evidence and as an
+ * `abandoned` event, so the ledger still explains how the row ended.
+ */
+export async function abandonHandoff(id: string, reason: string): Promise<HandoffRow> {
+  const why = required('abandon reason', reason);
+  const row = await mustGetHandoff(id);
+  expectSelfIntegrity(row);
+  if (row.status === 'closed') throw new Error(`handoff ${id} is already closed`);
+  const now = new Date().toISOString();
+  const evidence = `abandoned by operator: ${why}`;
+  await getDb().transaction(async () => {
+    const result = await getDb().run(
+      `UPDATE handoffs SET status = 'closed', closure_evidence = ?, closed_at = ?, updated_at = ?
+       WHERE id = ? AND status = ?`,
+      evidence,
+      now,
+      now,
+      id,
+      row.status,
+    );
+    if (result.changes !== 1) throw new Error(`handoff ${id} changed concurrently; reload before continuing`);
+    await appendEvent(id, 'abandoned', 'host', { fingerprint: row.fingerprint, from: row.status, reason: why }, now);
+  });
+  return (await getHandoff(id))!;
+}
+
 async function transition(
   id: string,
   actor: string,

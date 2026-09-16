@@ -123,6 +123,44 @@ describe('handoffs CLI', () => {
   });
 });
 
+describe('ncl handoffs abandon', () => {
+  it('is operator-only: an agent caller is denied, the host caller closes the row with the reason', async () => {
+    const create = await dispatch(
+      {
+        id: 'req-abandon-create',
+        command: 'handoffs-create',
+        args: {
+          id: 'CLI-ABANDON-1',
+          reviewer: ECHO,
+          project: 'none',
+          goal: 'g',
+          outcome: 'o',
+          scope: 's',
+          authority: 'recommend',
+        },
+      },
+      caller(ATLAS, 'sess-atlas-dm'),
+    );
+    expect(create.ok).toBe(true);
+
+    const agentAttempt = await dispatch(
+      { id: 'req-abandon-agent', command: 'handoffs-abandon', args: { id: 'CLI-ABANDON-1', reason: 'agent tries' } },
+      caller(ATLAS, 'sess-atlas-dm'),
+    );
+    expect(agentAttempt.ok).toBe(false);
+    expect(JSON.stringify(agentAttempt)).toMatch(/operator-only/);
+
+    const host = await dispatch(
+      { id: 'req-abandon-host', command: 'handoffs-abandon', args: { id: 'CLI-ABANDON-1', reason: 'smoke test' } },
+      { caller: 'host' },
+    );
+    expect(host.ok).toBe(true);
+    if (!host.ok) return;
+    expect((host.data as { status: string }).status).toBe('closed');
+    expect((host.data as { closure_evidence: string }).closure_evidence).toBe('abandoned by operator: smoke test');
+  });
+});
+
 describe('handoff revisions via ncl', () => {
   it('ncl handoffs create forwards --supersedes to the ledger', async () => {
     const create = await dispatch(
