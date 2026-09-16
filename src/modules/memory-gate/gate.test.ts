@@ -392,7 +392,12 @@ describe('memory_write door', () => {
       approver_user_id: OWNER,
     });
     await approve('appr-q');
-    expect((await getPendingApproval('appr-q'))?.status).toBe('pending');
+    // Retained = re-issued: the old (terminalized) card's row is gone and a fresh pending row carries the same request.
+    expect(await getPendingApproval('appr-q')).toBeUndefined();
+    const reissued = f.approvals.at(-1)!;
+    expect(reissued.payload.request_id).toBe('mw-q2');
+    expect((await getPendingApproval(`appr-${f.approvals.length}`))?.status).toBe('pending');
+    expect(f.notices.at(-1)).toContain('re-held');
     expect(await getMemoryOp(GROUP, 'mw-q2')).toBeUndefined();
     await completePendingOps({ notifyAgent: async () => {}, notifyOwner: async () => {}, now: () => new Date() });
     expect((await getMemoryOp(GROUP, 'mw-q0'))?.status).toBe('applied');
@@ -421,7 +426,8 @@ describe('memory_write door', () => {
       approver_user_id: OWNER,
     });
     await approve('appr-race');
-    expect((await getPendingApproval('appr-race'))?.status).toBe('pending');
+    expect(await getPendingApproval('appr-race')).toBeUndefined();
+    expect(f.approvals.at(-1)!.payload.request_id).toBe('mw-race');
     expect(await getMemoryOp(GROUP, 'mw-race')).toBeUndefined();
     expect(fs.existsSync(path.join(memoryDir, 'operations/decisions.md'))).toBe(false);
     await setQuiesced(false);
@@ -480,11 +486,15 @@ describe('memory_write door: hold confirmation and correction cases', () => {
     expect(noAdapter.notices.at(-1)).toContain('no delivery channel');
   });
 
-  it('a failed retention transition never deletes the approval', async () => {
-    const { completePendingOps } = await import('./ops.js');
-    void completePendingOps;
-    await setQuiesced(true);
-    fakes();
+  it('an unreadable ledger after replay failures keeps the approval for the operator', async () => {
+    fakes({
+      enqueueMemoryOp: async () => {
+        throw new Error('sqlite busy');
+      },
+      getMemoryOp: async () => {
+        throw new Error('sqlite busy');
+      },
+    });
     await createPendingApproval({
       approval_id: 'appr-keep',
       session_id: session.id,
@@ -500,18 +510,33 @@ describe('memory_write door: hold confirmation and correction cases', () => {
       options_json: JSON.stringify([]),
       approver_user_id: OWNER,
     });
-    const sessions = await import('../../db/sessions.js');
-    const original = sessions.transitionPendingApprovalStatus;
-    const spy = vi.spyOn(sessions, 'transitionPendingApprovalStatus').mockImplementation(async (id, from, to) => {
-      if (from === 'approved' && to === 'pending') throw new Error('db hiccup');
-      return original(id, from, to);
-    });
     await approve('appr-keep');
-    spy.mockRestore();
     const row = await getPendingApproval('appr-keep');
     expect(row).toBeDefined();
     expect(row!.status).toBe('approved');
-    expect(await getMemoryOp(GROUP, 'mw-keep')).toBeUndefined();
+  });
+
+  it('a quiesced replay whose re-hold cannot be issued keeps the approval for the operator', async () => {
+    await setQuiesced(true);
+    fakes({ getDeliveryAdapter: () => null });
+    await createPendingApproval({
+      approval_id: 'appr-noadapter',
+      session_id: session.id,
+      request_id: 'appr-noadapter',
+      action: 'memory_write',
+      payload: JSON.stringify({
+        ...request({ request_id: 'mw-noadapter' }),
+        session_id: session.id,
+        sha256: requestSha(request()),
+      }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    await approve('appr-noadapter');
+    expect((await getPendingApproval('appr-noadapter'))?.status).toBe('approved');
+    expect(await getMemoryOp(GROUP, 'mw-noadapter')).toBeUndefined();
     await setQuiesced(false);
   });
 });

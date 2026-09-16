@@ -40,7 +40,9 @@ async function enqueueMemoryWrite(content: Record<string, unknown>, session: Ses
 registerDeliveryAction(MEMORY_WRITE_ACTION, enqueueMemoryWrite, {
   guardAction: memoryWriteGuard,
   precheck: validateShape,
-  requestHold: requestMemoryHold,
+  requestHold: async (content, session) => {
+    await requestMemoryHold(content, session);
+  },
   onDeny: (_content, session, reason) => memoryGateDeps().notifyAgent(session, `memory request denied: ${reason}`),
 });
 registerApprovalHandler(MEMORY_WRITE_ACTION, retainingReplay);

@@ -117,6 +117,33 @@ describe('the standard mount set spawns (real buildMounts)', () => {
     ).toThrow(/memory overlay/);
   });
 
+  it('a read-only gateway replacement of the overlay backed by another directory is refused', async () => {
+    const mounts = await buildMounts(agentGroup, session, containerConfig, 'codex', {});
+    fs.mkdirSync(path.join(groupDir, 'scratch'), { recursive: true });
+    expect(() =>
+      composeSessionSpec({
+        agentGroup,
+        session,
+        containerName: 'nanoclaw-v2-real-3',
+        mounts,
+        containerConfig,
+        mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
+        contribution: {} as never,
+        gateway: {
+          mounts: [
+            {
+              class: 'allowlisted-extra',
+              hostPath: path.join(groupDir, 'scratch'),
+              containerPath: MEMORY_CONTAINER_PATH,
+              mode: 'ro',
+              groupScope: 'ag-real',
+            },
+          ],
+        } as never,
+      }),
+    ).toThrow(/backed by/);
+  });
+
   it('a symlinked memory root refuses the spawn', async () => {
     fs.symlinkSync(path.join(TEST_ROOT, 'outside'), path.join(groupDir, 'memory'));
     await expect(buildMounts(agentGroup, session, containerConfig, 'codex', {})).rejects.toThrow(/symlink/);

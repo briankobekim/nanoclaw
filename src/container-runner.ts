@@ -638,7 +638,9 @@ export async function buildMounts(
   // No writable mount may reach any group's memory (by host source or by
   // container destination), and the RO memory overlay must be present after
   // both ancestors it shadows. Throws and aborts the spawn otherwise.
-  assertNoWritableMemoryAlias(mounts, listProtectedMemoryRoots());
+  assertNoWritableMemoryAlias(mounts, listProtectedMemoryRoots(), {
+    expectedOverlaySource: path.join(groupDir, 'memory'),
+  });
 
   return mounts;
 }
@@ -728,9 +730,14 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   // will see: a contributed writable ancestor appended after the overlay would
   // shadow it, and the ordering check is what refuses that.
   const mergedMounts = mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []);
+  // The overlay must be backed by the group's own memory directory: anchor on
+  // the composed group mount (a contributed replacement of it is refused by the
+  // ordering rule), never on a contributed path.
+  const composedGroupMount = mounts.find((m) => m.containerPath === '/workspace/agent' && m.readonly === false);
   assertNoWritableMemoryAlias(
     mergedMounts.map((m) => ({ hostPath: m.hostPath, containerPath: m.containerPath, readonly: m.mode === 'ro' })),
     listProtectedMemoryRoots(),
+    composedGroupMount ? { expectedOverlaySource: path.join(composedGroupMount.hostPath, 'memory') } : {},
   );
 
   const agent: ContainerSpec = {

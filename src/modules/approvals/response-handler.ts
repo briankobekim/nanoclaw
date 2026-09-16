@@ -29,7 +29,12 @@ import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
-import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
+import {
+  getApprovalHandler,
+  notifyApprovalResolved,
+  REJECT_WITH_REASON_VALUE,
+  RetainApprovalError,
+} from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
@@ -121,25 +126,28 @@ async function handleRegisteredApproval(
     const result = await handler({ session, payload, approval, userId, notify });
     if (result && result.outcome === 'retained') {
       // The domain could not apply the grant right now (maintenance barrier)
-      // and asked to keep it: back to pending, card still actionable, no
-      // resolution notice. This transition is the only one, and its failure
-      // must never fall through to deletion: the row stays `approved` for an
-      // operator to reset, and the tap is not lost.
-      try {
-        await transitionPendingApprovalStatus(approval.approval_id, 'approved', 'pending');
-        log.info('Approval retained by handler', { approvalId: approval.approval_id, action: approval.action });
-        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed retention transition is logged and the row is left for the operator; deleting it would lose the owner's tap
-      } catch (err) {
-        log.error('Approval retention transition failed; row left as approved', {
-          approvalId: approval.approval_id,
-          action: approval.action,
-          err,
-        });
-      }
+      // and re-issued its own hold as a fresh card. This row's card is already
+      // terminalized by the channel bridge, so the row is simply removed —
+      // no resolution notice, no wake; the new card carries the tap.
+      log.info('Approval retained by handler (re-issued as a new hold)', {
+        approvalId: approval.approval_id,
+        action: approval.action,
+      });
+      await deletePendingApproval(approval.approval_id);
       return;
     }
     log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });
   } catch (err) {
+    if (err instanceof RetainApprovalError) {
+      // The domain cannot prove what happened to the grant: keep the row as
+      // `approved` for an operator, never delete it, no resolution notice.
+      log.error('Approval handler could not prove the grant outcome; row kept for the operator', {
+        approvalId: approval.approval_id,
+        action: approval.action,
+        err,
+      });
+      return;
+    }
     log.error('Approval handler threw', { approvalId: approval.approval_id, action: approval.action, err });
     await notify(
       `Your ${approval.action} was approved, but applying it failed: ${err instanceof Error ? err.message : String(err)}.`,

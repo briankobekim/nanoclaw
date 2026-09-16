@@ -10,7 +10,7 @@ import { getPendingApprovalsByAction } from '../../db/sessions.js';
 import { getDeliveryAdapter, reenterGuardedDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
-import { notifyAgent, requestApproval, type ApprovalHandlerContext } from '../approvals/index.js';
+import { notifyAgent, requestApproval, RetainApprovalError, type ApprovalHandlerContext } from '../approvals/index.js';
 import { getOwners } from '../permissions/db/user-roles.js';
 import { MEMORY_WRITE_ACTION, requestSha } from './guard.js';
 import { notifyOwners } from './notify.js';
@@ -105,28 +105,37 @@ export async function validateShape(content: Record<string, unknown>, session: S
   return false;
 }
 
-/** Fresh dispatch only: card the owner with the complete content, then confirm the hold exists. */
-export async function requestMemoryHold(content: Record<string, unknown>, session: Session): Promise<void> {
+/**
+ * Card the owner with the complete content, then confirm the hold exists.
+ * Returns true when a pending row for this request is on record. `rehold`
+ * re-issues a card for a grant that could not be applied while quiesced: the
+ * barrier blocks op inserts, not cards, so the quiesce check is skipped.
+ */
+export async function requestMemoryHold(
+  content: Record<string, unknown>,
+  session: Session,
+  options: { rehold?: boolean } = {},
+): Promise<boolean> {
   const path = content.path as string;
   const mode = content.mode as string;
   const requestId = content.request_id as string;
   const body = typeof content.content === 'string' ? content.content : '';
 
-  if (await deps.isQuiesced()) {
+  if (!options.rehold && (await deps.isQuiesced())) {
     await deps.notifyAgent(session, 'memory writes are paused for maintenance; try later');
-    return;
+    return false;
   }
   if (!deps.getDeliveryAdapter()) {
     await deps.notifyAgent(
       session,
       'memory_write could not be held right now (no delivery channel); retry in a minute',
     );
-    return;
+    return false;
   }
   const owners = await deps.getOwners();
   if (owners.length === 0) {
     await deps.notifyAgent(session, 'memory_write could not be held: no owner is configured to approve it');
-    return;
+    return false;
   }
   const agentGroup = await getAgentGroup(session.agent_group_id);
   const agentName = agentGroup?.name ?? session.agent_group_id;
@@ -140,7 +149,7 @@ export async function requestMemoryHold(content: Record<string, unknown>, sessio
       session,
       'memory request denied: the approval card would be too long; split into smaller writes',
     );
-    return;
+    return false;
   }
 
   await deps.requestApproval({
@@ -167,14 +176,20 @@ export async function requestMemoryHold(content: Record<string, unknown>, sessio
     }
   });
   if (held) {
-    await deps.notifyAgent(session, `memory_write held for Kobe's approval: ${path}`);
-    return;
+    await deps.notifyAgent(
+      session,
+      options.rehold
+        ? `memory_write re-held for Kobe's approval after maintenance: ${path}`
+        : `memory_write held for Kobe's approval: ${path}`,
+    );
+    return true;
   }
   log.error('memory-gate: hold was requested but no pending approval exists', { sessionId: session.id, requestId });
   await deps.notifyAgent(
     session,
     `memory_write could not be held (no approver or no DM); ask Kobe directly. path=${path}`,
   );
+  return false;
 }
 
 const REPLAY_ATTEMPTS = 3;
@@ -194,8 +209,12 @@ export async function retainingReplay(ctx: ApprovalHandlerContext): Promise<void
       return;
     } catch (err) {
       if (err instanceof QuiescedError) {
-        // The approvals response handler owns the approved → pending transition.
-        log.info('memory-gate: approval retained while quiesced', { approvalId: ctx.approval.approval_id });
+        // The old card is already terminalized by the channel bridge, so the
+        // tap is carried by a FRESH card for the same request. If that card
+        // cannot be issued, keep the old row for the operator instead.
+        const reissued = await requestMemoryHold(ctx.payload, ctx.session, { rehold: true });
+        if (!reissued) throw new RetainApprovalError('quiesced and the hold could not be re-issued');
+        log.info('memory-gate: approval re-issued while quiesced', { approvalId: ctx.approval.approval_id });
         return { outcome: 'retained' };
       }
       lastError = err;
@@ -204,7 +223,18 @@ export async function retainingReplay(ctx: ApprovalHandlerContext): Promise<void
     }
   }
   const requestId = typeof ctx.payload.request_id === 'string' ? ctx.payload.request_id : '';
-  if (requestId && (await deps.getMemoryOp(ctx.session.agent_group_id, requestId))) {
+  let committed: boolean;
+  try {
+    committed = requestId !== '' && (await deps.getMemoryOp(ctx.session.agent_group_id, requestId)) !== undefined;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- if the ledger cannot be read the grant's fate is unknown; keep the row rather than guess
+  } catch (err) {
+    log.error('memory-gate: ledger unreadable after replay failures; approval kept for the operator', {
+      requestId,
+      err,
+    });
+    throw new RetainApprovalError('ledger state unknown after replay failures');
+  }
+  if (committed) {
     log.warn('memory-gate: replay threw after the op was committed; the sweep will complete it', { requestId });
     return;
   }

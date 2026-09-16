@@ -265,7 +265,7 @@ describe('approval response authorization', () => {
 });
 
 describe('retained approvals (memory-provenance-gate plan §4.3)', () => {
-  it('a handler that returns retained puts the row back to pending and leaves the card actionable', async () => {
+  it('a handler that returns retained removes the clicked row without a resolution, and RetainApprovalError keeps it', async () => {
     await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
     await grantRole({
       user_id: 'telegram:owner',
@@ -300,20 +300,33 @@ describe('retained approvals (memory-provenance-gate plan §4.3)', () => {
 
     expect(claimed).toBe(true);
     expect(handler).toHaveBeenCalledTimes(1);
-    const row = await getPendingApproval('appr-retained');
-    expect(row).toBeDefined();
-    expect(row!.status).toBe('pending');
+    // Retained = the domain re-issued its own hold; the clicked row (whose card the bridge already terminalized) is removed.
+    expect(await getPendingApproval('appr-retained')).toBeUndefined();
 
-    // A second click resolves it normally once the handler no longer retains.
-    handler.mockResolvedValue(undefined);
+    // RetainApprovalError = the grant's fate is unknown; the row is kept as approved, never deleted.
+    const { RetainApprovalError } = await import('./primitive.js');
+    const uncertain = vi.fn().mockRejectedValue(new RetainApprovalError('ledger unreadable'));
+    registerApprovalHandler('uncertain_action', uncertain);
+    await createPendingApproval({
+      approval_id: 'appr-uncertain',
+      session_id: 'sess-1',
+      request_id: 'appr-uncertain',
+      action: 'uncertain_action',
+      payload: JSON.stringify({ request_id: 'r2' }),
+      created_at: now(),
+      title: 'Uncertain',
+      options_json: JSON.stringify([]),
+    });
     await handleApprovalsResponse({
-      questionId: 'appr-retained',
+      questionId: 'appr-uncertain',
       value: 'approve',
       userId: 'owner',
       channelType: 'telegram',
       platformId: 'dm-owner',
       threadId: null,
     });
-    expect(await getPendingApproval('appr-retained')).toBeUndefined();
+    const kept = await getPendingApproval('appr-uncertain');
+    expect(kept).toBeDefined();
+    expect(kept!.status).toBe('approved');
   });
 });

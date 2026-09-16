@@ -72,12 +72,26 @@ export interface ApprovalHandlerContext {
 }
 
 /**
- * A handler may return `{ outcome: 'retained' }` to keep the grant: the row
- * goes back to `pending` and the card stays actionable (used while a domain
- * is quiesced for maintenance). Returning nothing resolves the approval.
+ * A handler may return `{ outcome: 'retained' }` when it could not apply the
+ * grant right now and has RE-ISSUED its own hold (a fresh card): the old row
+ * is deleted without a resolution notice, and the new card carries the tap.
+ * Returning nothing resolves the approval.
  */
 export interface ApprovalHandlerResult {
   outcome: 'retained';
+}
+
+/**
+ * Thrown by a handler when it cannot prove what happened to the grant (for
+ * example the ledger could not be read): the response handler keeps the row
+ * as `approved` and never deletes it, so an operator can resolve it by hand
+ * and the owner's tap is not lost.
+ */
+export class RetainApprovalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetainApprovalError';
+  }
 }
 
 export type ApprovalHandler = (ctx: ApprovalHandlerContext) => Promise<void | ApprovalHandlerResult>;

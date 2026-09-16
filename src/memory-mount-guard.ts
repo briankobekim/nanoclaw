@@ -118,7 +118,7 @@ function describeMount(mount: VolumeMount): string {
 export function assertNoWritableMemoryAlias(
   mounts: readonly VolumeMount[],
   protectedRoots: readonly string[],
-  options: { requireOverlay?: boolean } = {},
+  options: { requireOverlay?: boolean; expectedOverlaySource?: string } = {},
 ): void {
   const requireOverlay = options.requireOverlay ?? true;
   const roots = protectedRoots.map((root) => path.resolve(root));
@@ -171,6 +171,18 @@ export function assertNoWritableMemoryAlias(
   const overlay = mounts[overlayIndex];
   if (overlay.readonly !== true) {
     throw new MemoryMountError(`memory overlay at ${MEMORY_CONTAINER_PATH} must be read-only`);
+  }
+  if (options.expectedOverlaySource !== undefined) {
+    // A read-only replacement backed by some OTHER directory would show that
+    // directory as memory while the group mount keeps it writable — refuse
+    // anything but the group's own memory directory as the overlay source.
+    const expected = canonicalHostPath(options.expectedOverlaySource);
+    const actual = canonicalHostPath(overlay.hostPath);
+    if (actual !== expected) {
+      throw new MemoryMountError(
+        `memory overlay at ${MEMORY_CONTAINER_PATH} is backed by ${actual}, expected the group's own memory directory ${expected}`,
+      );
+    }
   }
   if (!hasWorkspace || !hasAgent) {
     throw new MemoryMountError(
