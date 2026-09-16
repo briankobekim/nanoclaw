@@ -79,9 +79,20 @@ export function createFileNoFollow(p: string, content: string | Buffer): void {
   try {
     fs.writeFileSync(fd, content);
     fs.fsyncSync(fd);
-  } finally {
+  } catch (err) {
+    // The file is ours (created exclusively a moment ago) and is either short
+    // or unsynced: remove it so the next run must create and fsync it again
+    // instead of accepting it as already present.
     fs.closeSync(fd);
+    try {
+      fs.unlinkSync(p);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- the original failure is what matters; a failed cleanup is logged with it
+    } catch (cleanupErr) {
+      log.error('memory scaffold: could not remove a partially written file', { path: p, err: cleanupErr });
+    }
+    throw err;
   }
+  fs.closeSync(fd);
 }
 
 /**

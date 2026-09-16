@@ -9,7 +9,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { log } from './log.js';
 import {
@@ -37,6 +37,10 @@ function fixture(): { root: string; groupDir: string; memory: string } {
 function deps(): PreflightDeps & { notifyOwner: ReturnType<typeof vi.fn> } {
   return { notifyOwner: vi.fn().mockResolvedValue(undefined) };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /** Asserts a refusal: typed error naming `expectedPath`, one owner notice, one error log. */
 async function expectRefused(groupDir: string, expectedPath: string): Promise<MemoryPreflightError> {
@@ -193,6 +197,51 @@ describe('M1 prepareMemoryRoot refuses any symlink in the tree, wrong types at s
       snapshot['owner-statements.md'] + '\n## Brian\n\n- fact\n',
     );
     expect(fs.readFileSync(path.join(memory, 'index.md'), 'utf8')).toBe(snapshot['index.md']);
+    expect(d.notifyOwner).not.toHaveBeenCalled();
+  });
+
+  it('a scaffold file whose write or fsync fails is removed, so the next run recreates and fsyncs it', async () => {
+    const { groupDir, memory } = fixture();
+    const d = deps();
+    const realFsync = fs.fsyncSync;
+    let failFileFsyncFor: string | null = 'owner-statements.md';
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      const st = fs.fstatSync(fd);
+      const victim = failFileFsyncFor ? path.join(memory, failFileFsyncFor) : null;
+      if (victim && st.isFile() && fs.existsSync(victim) && st.ino === fs.statSync(victim).ino) {
+        throw new Error('EIO: injected file fsync failure');
+      }
+      return realFsync(fd);
+    });
+
+    // First run: owner-statements.md is created, its fsync fails, the run throws and the file is gone.
+    await expect(prepareMemoryRoot(groupDir, d)).rejects.toThrow(/injected file fsync failure/);
+    expect(fs.existsSync(path.join(memory, 'owner-statements.md'))).toBe(false);
+    // Second run: the file is created again and, with a healthy fsync, kept.
+    failFileFsyncFor = null;
+    await prepareMemoryRoot(groupDir, d);
+    expect(fs.readFileSync(path.join(memory, 'owner-statements.md'), 'utf8')).toBe(
+      '---\ntype: owner-statements\n---\n',
+    );
+
+    // A template whose WRITE fails part-way is removed too, and recreated byte-identical next time.
+    fs.rmSync(path.join(memory, 'system', 'definition.md'));
+    const realWrite = fs.writeFileSync;
+    let failWrite = true;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+      if (failWrite && typeof file === 'number') {
+        failWrite = false;
+        realWrite(file, 'partial');
+        throw new Error('ENOSPC: injected partial write');
+      }
+      return realWrite(file, data, options);
+    });
+    await expect(prepareMemoryRoot(groupDir, d)).rejects.toThrow(/injected partial write/);
+    expect(fs.existsSync(path.join(memory, 'system', 'definition.md'))).toBe(false);
+    await prepareMemoryRoot(groupDir, d);
+    expect(fs.readFileSync(path.join(memory, 'system', 'definition.md'), 'utf8')).toBe(
+      fs.readFileSync(path.join(TEMPLATES, 'system', 'definition.md'), 'utf8'),
+    );
     expect(d.notifyOwner).not.toHaveBeenCalled();
   });
 
