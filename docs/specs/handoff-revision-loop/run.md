@@ -92,3 +92,12 @@ Files: `ledger.ts` (+`expectSelfIntegrity`, +`trustedSupersededIds`), `stall-pin
 
 ### Verdict
 `clear` after one correction batch: no verified MUST-FIX remains; other-family coverage completed (not degraded). Known residuals: at-least-once pings (plan §9); duplicate-field prose ambiguity (follow-up above).
+
+## Stage: rollout (2026-09-15 20:06–, local)
+
+- 20:06 — `launchctl kickstart -k` on the new build. Host entered a crash loop: `Upgrade tripwire: install not on the sanctioned path` (marker commit cb9b6f01 vs code commit 8edfe916). Root cause: the tripwire hashes HEAD's commit and tree; today's two commits on `production` were the first ever on this checkout, so the marker stamped by setup on 2026-08-21 no longer matched. Six attempts with the breaker schedule 0/0/10/30/120/300 s; Atlas and Echo unavailable during the loop. No data was touched (the migration never ran because startup aborts before it).
+- 20:10 — Followed `docs/upgrade-recovery.md` "If you committed a local customization": commit content verified (two reviewed commits), build/tests already run, then `pnpm exec tsx scripts/upgrade-state.ts set 2.2.0 manual` → marker now commit 8edfe916 / tree c5fe54cb. Deleting `data/circuit-breaker.json` is blocked by the repository guard hook, so the sleeping attempt 6 is left to resume at 00:14:30Z on its own; it re-checks the marker at that point.
+- Process lesson recorded in memory: stamp the marker after every commit on the production branch, before restarting.
+- 20:14:30 — Attempt 6 resumed, passed the tripwire, applied `module:nanoclaw.handoff-ledger:supersedes` on the live database, started cli/slack/slack-quiverchat adapters, `NanoClaw running` at 20:14:32.
+- 20:14:32 — First sweep: three `owner_pinged` events recorded, one per stalled handoff, recipient `slack:D0BRWNQCTED` (Brian's DM via Atlas's bot), each with a Slack `platform_message_id`: handoff-1789407737214-fe7ae416 (`delivered`), handoff-1789406994832-675d2d37 (`created`), RECOVERY-20260909-ATLAS-ECHO (`created`). handoff-1789503177574-b2315abc (`changes_required`, 1.5 h) correctly not pinged yet. No ERROR/WARN in either log since start. Live column and `schema_version` row confirmed.
+- Result: **ACTIVATED**. Remaining live check for Brian: Atlas revises b2315abc with `--supersedes` (first real round two), Echo reviews it reading the prior notes.
