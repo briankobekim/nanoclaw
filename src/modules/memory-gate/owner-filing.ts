@@ -1,8 +1,11 @@
 /**
  * Owner filing (plan §4.1): a message from the owner that starts with
- * `remember:` is written by the host, keyed by the message's own per-agent
- * id, into the group's owner-statements file. No agent is involved.
+ * `remember:` is written by the host, keyed by the message's originating
+ * conversation and its platform id, into the group's owner-statements file.
+ * No agent is involved.
  */
+import { createHash } from 'crypto';
+
 import { log } from '../../log.js';
 import { notifyOwners } from './notify.js';
 import { completePendingOps, enqueueMemoryOp, OWNER_STATEMENTS_PATH } from './ops.js';
@@ -30,8 +33,34 @@ export function isOwnerFilingMessage(text: unknown): text is string {
   return typeof text === 'string' && OWNER_FILING_RE.test(text);
 }
 
-export function ownerFilingRequestId(perAgentMessageId: string): string {
-  return `owner:${perAgentMessageId}`;
+/**
+ * Where an owner message came from. Platform message ids are unique only
+ * within their conversation (and adapter instance), so the ledger key is the
+ * whole tuple, hashed to a bounded, deterministic id.
+ */
+export interface OwnerFilingSource {
+  channelType: string;
+  instance: string | null;
+  messagingGroupId: string;
+  platformId: string;
+  threadId: string | null;
+  messageId: string;
+  agentGroupId: string;
+}
+
+export function ownerFilingRequestId(source: OwnerFilingSource): string {
+  const tuple = [
+    source.channelType,
+    source.instance ?? '',
+    source.messagingGroupId,
+    source.platformId,
+    source.threadId ?? '',
+    source.messageId,
+    source.agentGroupId,
+  ]
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `owner:${createHash('sha256').update(tuple).digest('hex').slice(0, 32)}`;
 }
 
 /**
@@ -42,12 +71,14 @@ export function ownerFilingRequestId(perAgentMessageId: string): string {
 export async function fileOwnerStatement(args: {
   agentGroupId: string;
   sessionId: string;
+  source: OwnerFilingSource;
+  /** Shown in the filed block so the owner can find the message again. */
   perAgentMessageId: string;
   text: string;
 }): Promise<'inserted' | 'exists' | 'quiesced'> {
   const result = await deps.enqueueMemoryOp({
     agentGroupId: args.agentGroupId,
-    requestId: ownerFilingRequestId(args.perAgentMessageId),
+    requestId: ownerFilingRequestId(args.source),
     sessionId: args.sessionId,
     kind: 'owner',
     path: OWNER_STATEMENTS_PATH,

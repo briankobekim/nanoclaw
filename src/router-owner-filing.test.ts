@@ -48,13 +48,30 @@ import './modules/permissions/index.js';
 import './modules/memory-gate/index.js';
 import { getMemoryOp, listOps } from './modules/memory-gate/ops.js';
 import { setQuiesced } from './modules/memory-gate/quiesce.js';
-import { setOwnerFilingDeps } from './modules/memory-gate/owner-filing.js';
+import { ownerFilingRequestId, setOwnerFilingDeps } from './modules/memory-gate/owner-filing.js';
 
 const OWNER_RAW = 'U0OWNER';
 const OWNER = `testchat:${OWNER_RAW}`;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+/** The ledger key the router derives for a message in the default DM conversation (mg-1). */
+function key(
+  messageId: string,
+  agentGroupId: string,
+  mg: { id: string; platformId: string } = { id: 'mg-1', platformId: 'testchat:D1' },
+): string {
+  return ownerFilingRequestId({
+    channelType: 'testchat',
+    instance: 'testchat',
+    messagingGroupId: mg.id,
+    platformId: mg.platformId,
+    threadId: null,
+    messageId,
+    agentGroupId,
+  });
 }
 
 const channelDefaults: ChannelDefaults = {
@@ -114,10 +131,11 @@ async function inbound(
   text: string,
   senderId = OWNER_RAW,
   extra: Record<string, unknown> = {},
+  platformId = 'testchat:D1',
 ): Promise<void> {
   await routeInbound({
     channelType: 'testchat',
-    platformId: 'testchat:D1',
+    platformId,
     threadId: null,
     message: {
       id,
@@ -181,9 +199,9 @@ describe('owner filing', () => {
       ['ag-atlas', 'atlas'],
       ['ag-echo', 'echo'],
     ] as const) {
-      const op = await getMemoryOp(group, `owner:m1:${group}`);
+      const op = await getMemoryOp(group, key('m1', group));
       expect(op?.kind).toBe('owner');
-      await vi.waitFor(async () => expect((await getMemoryOp(group, `owner:m1:${group}`))?.status).toBe('applied'));
+      await vi.waitFor(async () => expect((await getMemoryOp(group, key('m1', group)))?.status).toBe('applied'));
       const filed = fs.readFileSync(path.join(memoryDir(folder), 'owner-statements.md'), 'utf8');
       expect(filed).toContain('Kobe wrote (msg m1:' + group + ')');
       expect(filed).toContain('remember: my flight is Friday');
@@ -200,7 +218,7 @@ describe('owner filing', () => {
     // First attempt: the op is inserted, then the mailbox write fails.
     vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('disk full'));
     await expect(inbound('m10', 'remember: idempotent')).rejects.toThrow('disk full');
-    expect((await getMemoryOp('ag-atlas', 'owner:m10:ag-atlas'))?.kind).toBe('owner');
+    expect((await getMemoryOp('ag-atlas', key('m10', 'ag-atlas')))?.kind).toBe('owner');
     const before = await withExistingMailboxSession(
       'ag-atlas',
       (await findSessionForAgent('ag-atlas', 'mg-1', null))!.id,
@@ -215,16 +233,18 @@ describe('owner filing', () => {
       (mb) => mb.getInboundHistory(10),
     );
     expect((afterRows ?? []).filter((row) => JSON.parse(row.content).text === 'remember: idempotent')).toHaveLength(1);
-    const ops = (await listOps()).filter((op) => op.request_id === 'owner:m10:ag-atlas');
+    const ops = (await listOps()).filter((op) => op.request_id === key('m10', 'ag-atlas'));
     expect(ops).toHaveLength(1);
-    await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', 'owner:m10:ag-atlas'))?.status).toBe('applied'));
+    await vi.waitFor(async () =>
+      expect((await getMemoryOp('ag-atlas', key('m10', 'ag-atlas')))?.status).toBe('applied'),
+    );
     const filed = fs.readFileSync(path.join(memoryDir('atlas'), 'owner-statements.md'), 'utf8');
     expect(filed.split('remember: idempotent').length - 1).toBe(1);
 
     const { enqueueMemoryOp } = await import('./modules/memory-gate/ops.js');
     await enqueueMemoryOp({
       agentGroupId: 'ag-atlas',
-      requestId: 'owner:m11:ag-atlas',
+      requestId: key('m11', 'ag-atlas'),
       sessionId: 'sess-other',
       kind: 'owner',
       path: 'owner-statements.md',
@@ -245,7 +265,9 @@ describe('owner filing', () => {
       attachments: [{ name: 'secret.pdf', url: 'https://example.invalid/secret.pdf' }],
       replyTo: { id: 'm0', text: 'quoted text' },
     });
-    await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', 'owner:m20:ag-atlas'))?.status).toBe('applied'));
+    await vi.waitFor(async () =>
+      expect((await getMemoryOp('ag-atlas', key('m20', 'ag-atlas')))?.status).toBe('applied'),
+    );
     const filed = fs.readFileSync(path.join(memoryDir('atlas'), 'owner-statements.md'), 'utf8');
     expect(filed).toContain('attachments are not filed');
     expect(filed).not.toContain('secret.pdf');
@@ -253,10 +275,59 @@ describe('owner filing', () => {
 
     await setQuiesced(true);
     await inbound('m21', 'remember: paused');
-    expect(await getMemoryOp('ag-atlas', 'owner:m21:ag-atlas')).toBeUndefined();
+    expect(await getMemoryOp('ag-atlas', key('m21', 'ag-atlas'))).toBeUndefined();
     expect((await lastInboundContent('ag-atlas')).text).toBe('remember: paused');
     expect(ownerNotices).toHaveLength(1);
     await setQuiesced(false);
+  });
+
+  it('equal platform message ids from two conversations of one agent file as two statements', async () => {
+    await createMessagingGroup({
+      id: 'mg-2',
+      channel_type: 'testchat',
+      platform_id: 'testchat:D2',
+      instance: 'testchat',
+      name: 'Kobe elsewhere',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    await createMessagingGroupAgent({
+      id: 'mga-atlas-2',
+      messaging_group_id: 'mg-2',
+      agent_group_id: 'ag-atlas',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      threads: 1,
+      created_at: now(),
+    });
+
+    await inbound('same-id', 'remember: said in the first chat');
+    await inbound('same-id', 'remember: said in the second chat', OWNER_RAW, {}, 'testchat:D2');
+
+    const first = key('same-id', 'ag-atlas');
+    const second = key('same-id', 'ag-atlas', { id: 'mg-2', platformId: 'testchat:D2' });
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^owner:[0-9a-f]{32}$/);
+    await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', first))?.status).toBe('applied'));
+    await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', second))?.status).toBe('applied'));
+    const filed = fs.readFileSync(path.join(memoryDir('atlas'), 'owner-statements.md'), 'utf8');
+    expect(filed).toContain('said in the first chat');
+    expect(filed).toContain('said in the second chat');
+    // Both messages were delivered to their own sessions.
+    const s1 = await findSessionForAgent('ag-atlas', 'mg-1', null);
+    const s2 = await findSessionForAgent('ag-atlas', 'mg-2', null);
+    expect(s1!.id).not.toBe(s2!.id);
+    const rows1 = await withExistingMailboxSession('ag-atlas', s1!.id, (mb) => mb.getInboundHistory(5));
+    const rows2 = await withExistingMailboxSession('ag-atlas', s2!.id, (mb) => mb.getInboundHistory(5));
+    expect((rows1 ?? []).some((row) => JSON.parse(row.content).text === 'remember: said in the first chat')).toBe(true);
+    expect((rows2 ?? []).some((row) => JSON.parse(row.content).text === 'remember: said in the second chat')).toBe(
+      true,
+    );
   });
 
   it('the router stamps the advisory trust attribute', async () => {

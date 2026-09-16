@@ -245,22 +245,42 @@ function tempPathFor(abs: string, op: MemoryOpRow): string {
   return path.join(path.dirname(abs), `${path.basename(abs)}.mg-${tag}.tmp`);
 }
 
-const TEMP_RE = /\.mg-[0-9a-f]{8}\.tmp$/;
-
-/** Remove every memory-gate temp file left in the tree by a crash mid-write (the group lock makes them all stale here). */
-function removeStaleTemps(memoryRoot: string): void {
-  const pending: string[] = [memoryRoot];
-  while (pending.length > 0) {
-    const dir = pending.pop()!;
-    for (const name of fs.readdirSync(dir)) {
-      const entry = path.join(dir, name);
-      const st = fs.lstatSync(entry);
-      if (st.isDirectory()) pending.push(entry);
-      else if (st.isFile() && TEMP_RE.test(name)) {
-        log.warn('memory-gate: removing stale temp file left by an interrupted write', { file: entry });
-        removeQuietly(entry);
+/**
+ * Remove the temp file of each pending op that a crash between the temp
+ * write and the rename may have left behind. Only the exact, ledger-derived
+ * path of each op is touched (and only when it is a regular file): the host
+ * never deletes a file it cannot prove it created, whatever its name.
+ */
+function removeOpTemps(memoryRoot: string, ops: MemoryOpRow[]): void {
+  for (const op of ops) {
+    const target = resolveTarget(memoryRoot, op.path);
+    if (!target.ok) continue;
+    const tmp = tempPathFor(target.abs, op);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(tmp);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- absent is the normal case; anything else is logged and left alone
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        log.warn('memory-gate: could not inspect an op temp path', { file: tmp, err });
       }
+      continue;
     }
+    if (!st.isFile()) continue;
+    log.warn('memory-gate: removing the temp file left by an interrupted write', {
+      file: tmp,
+      agentGroupId: op.agent_group_id,
+      requestId: op.request_id,
+    });
+    removeQuietly(tmp);
+  }
+}
+
+/** The live target no longer matches what the ledger recorded: the op becomes a conflict, never a write. */
+class TargetChangedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'TargetChangedError';
   }
 }
 
@@ -292,7 +312,7 @@ async function completeGroup(groupId: string, deps: CompletionDeps): Promise<voi
     throw err;
   }
 
-  removeStaleTemps(memoryRoot);
+  removeOpTemps(memoryRoot, ops);
 
   for (const op of ops) {
     try {
@@ -459,25 +479,42 @@ async function completeOne(op: MemoryOpRow, memoryRoot: string, deps: Completion
     }
   }
 
+  // Re-verified IMMEDIATELY before the rename or unlink: every path component
+  // is resolved again and the live bytes must still be the recorded before
+  // state, so an edit that landed while the hashes were being committed (or
+  // while the temp file was written) turns the op into a conflict instead of
+  // being overwritten or deleted. (§4.3 step 4.)
+  const recheck = (): string | null => {
+    const again = resolveTarget(memoryRoot, op.path);
+    if (!again.ok) return again.reason;
+    if (again.abs !== target.abs) return `target path resolved differently: ${again.abs}`;
+    const live = stateOf(readCurrent(again.abs));
+    if (live !== current) return `file changed since prepare: before_sha256 ${current}, now ${live}`;
+    return null;
+  };
   try {
-    mutate(target.abs, planned, tempPathFor(target.abs, op));
-    // eslint-disable-next-line no-catch-all/no-catch-all -- every filesystem failure during the mutation is one failed attempt, retried by the sweep
+    mutate(target.abs, planned, tempPathFor(target.abs, op), recheck);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- a changed target is a conflict; every other filesystem failure is one failed attempt, retried by the sweep
   } catch (err) {
+    if (err instanceof TargetChangedError) {
+      await markConflict(op, err.message, deps);
+      return;
+    }
     await failAttempt(op, attempts, err, deps);
     return;
   }
   await markApplied(op, attempts, deps);
 }
 
-function assertRealDirectory(dir: string): void {
-  if (!fs.lstatSync(dir).isDirectory()) throw new Error(`parent is no longer a real directory: ${dir}`);
-}
-
-/** replace/append: the op's own temp file in the same directory, then rename over the target; delete: unlink. */
-function mutate(abs: string, planned: Buffer | null, tmp: string): void {
-  const parent = path.dirname(abs);
+/**
+ * replace/append: the op's own temp file in the same directory, then rename
+ * over the target; delete: unlink. `recheck` runs right before the rename or
+ * unlink and returns a reason when the target no longer matches the ledger.
+ */
+function mutate(abs: string, planned: Buffer | null, tmp: string, recheck: () => string | null): void {
   if (planned === null) {
-    assertRealDirectory(parent);
+    const changed = recheck();
+    if (changed !== null) throw new TargetChangedError(changed);
     fs.unlinkSync(abs);
     return;
   }
@@ -495,7 +532,8 @@ function mutate(abs: string, planned: Buffer | null, tmp: string): void {
   }
   fs.closeSync(fd);
   try {
-    assertRealDirectory(parent);
+    const changed = recheck();
+    if (changed !== null) throw new TargetChangedError(changed);
     fs.renameSync(tmp, abs);
   } catch (err) {
     removeQuietly(tmp);

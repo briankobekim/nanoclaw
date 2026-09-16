@@ -425,6 +425,68 @@ describe('memory-gate ops completion', () => {
     expect(deps.notifyOwner).not.toHaveBeenCalled();
   });
 
+  it('removes only the exact temp path of a pending op and never a look-alike file', async () => {
+    // An operator's file that merely LOOKS like a memory-gate temp file.
+    const lookAlike = path.join(memoryRoot, 'notes.md.mg-deadbeef.tmp');
+    fs.writeFileSync(lookAlike, 'not ours');
+    // The stale temp of the op itself, as a crash between temp write and rename leaves it.
+    await enqueueMemoryOp(free('t1', 'notes.md', 'replace', 'from the op'));
+    const tag = sha(`${GROUP}\nt1`).slice(0, 8);
+    const ownTemp = path.join(memoryRoot, `notes.md.mg-${tag}.tmp`);
+    fs.writeFileSync(ownTemp, 'half-written');
+
+    await completePendingOps(deps);
+
+    expect(await getMemoryOp(GROUP, 't1')).toMatchObject({ status: 'applied' });
+    expect(read('notes.md')).toBe('from the op');
+    expect(fs.existsSync(ownTemp)).toBe(false);
+    expect(fs.readFileSync(lookAlike, 'utf8')).toBe('not ours');
+  });
+
+  it('an edit that lands between prepare and the rename or unlink becomes a conflict, never a write', async () => {
+    // deps.now() is evaluated while the prepare UPDATE is being issued: the
+    // last moment before the mutation where an outside edit can slip in.
+    const nowSpy = vi.fn(() => NOW);
+    deps.now = nowSpy;
+    await enqueueMemoryOp(free('w1', 'notes.md', 'append', 'appended'));
+    nowSpy.mockImplementationOnce(() => {
+      fs.writeFileSync(path.join(memoryRoot, 'notes.md'), 'edited by hand\n');
+      return NOW;
+    });
+    await completePendingOps(deps);
+    const w1 = (await getMemoryOp(GROUP, 'w1'))!;
+    expect(w1.status).toBe('conflict');
+    expect(w1.before_sha256).toBe(sha('hello\n'));
+    expect(w1.last_error).toMatch(/changed since prepare/);
+    expect(read('notes.md')).toBe('edited by hand\n');
+    expect(tmpFiles()).toEqual([]);
+
+    await enqueueMemoryOp(free('d1', 'index.md', 'delete', null));
+    nowSpy.mockImplementationOnce(() => {
+      fs.writeFileSync(path.join(memoryRoot, 'index.md'), '# index, revised\n');
+      return NOW;
+    });
+    await completePendingOps(deps);
+    expect((await getMemoryOp(GROUP, 'd1'))!.status).toBe('conflict');
+    expect(read('index.md')).toBe('# index, revised\n');
+
+    // A component swapped for a symlink in the same window is a conflict too.
+    fs.mkdirSync(path.join(memoryRoot, 'sub'));
+    fs.writeFileSync(path.join(memoryRoot, 'sub', 'a.md'), 'a\n');
+    await enqueueMemoryOp(free('s1', 'sub/a.md', 'replace', 'replaced'));
+    nowSpy.mockImplementationOnce(() => {
+      fs.rmSync(path.join(memoryRoot, 'sub'), { recursive: true });
+      fs.mkdirSync(path.join(GROUPS_ROOT, 'elsewhere'));
+      fs.writeFileSync(path.join(GROUPS_ROOT, 'elsewhere', 'a.md'), 'a\n');
+      fs.symlinkSync(path.join(GROUPS_ROOT, 'elsewhere'), path.join(memoryRoot, 'sub'));
+      return NOW;
+    });
+    await completePendingOps(deps);
+    expect((await getMemoryOp(GROUP, 's1'))!.status).toBe('conflict');
+    expect(fs.readFileSync(path.join(GROUPS_ROOT, 'elsewhere', 'a.md'), 'utf8')).toBe('a\n');
+    expect(agentNotices().filter((text) => /conflict/i.test(text))).toHaveLength(3);
+  });
+
   it('appends after a missing trailing newline, replaces, and deletes, one file per op', async () => {
     fs.writeFileSync(path.join(memoryRoot, 'notes.md'), 'no newline');
     await enqueueMemoryOp(free('a1', 'notes.md', 'append', 'tail'));

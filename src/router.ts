@@ -594,7 +594,8 @@ async function deliverToAgent(
   // Memory provenance gate (docs/specs/memory-provenance-gate): label the
   // message with a host-computed trust value the agent can see, and file an
   // owner message that starts with `remember:` BEFORE it is delivered, keyed
-  // by this per-agent message id so a retry of the same event is idempotent.
+  // by its conversation and platform message id so a retry of the same event
+  // is idempotent and equal ids from different conversations never collide.
   const parsedContent = parseContentSafe(event.message.content);
   const owners = new Set((await getOwners()).map((row) => row.user_id));
   const trust = await classifyTrust({
@@ -609,6 +610,15 @@ async function deliverToAgent(
       await fileOwnerStatement({
         agentGroupId: agent.agent_group_id,
         sessionId: session.id,
+        source: {
+          channelType: event.channelType,
+          instance: mg.instance ?? null,
+          messagingGroupId: mg.id,
+          platformId: mg.platform_id,
+          threadId: deliveryAddr.threadId ?? null,
+          messageId: event.message.id,
+          agentGroupId: agent.agent_group_id,
+        },
         perAgentMessageId: messageId,
         text: parsedContent.text,
       });

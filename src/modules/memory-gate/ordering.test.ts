@@ -113,11 +113,13 @@ describe('fourth-review corrections', () => {
     const { createHash } = await import('node:crypto');
     const tag = createHash('sha256').update(`${GROUP}\ncrashed`).digest('hex').slice(0, 8);
     fs.writeFileSync(path.join(memoryDir, `notes.md.mg-${tag}.tmp`), 'partial');
-    fs.writeFileSync(path.join(memoryDir, 'other.md.mg-deadbeef.tmp'), 'stale');
+    // A file that merely looks like a temp file is not ours and must survive (fifth review).
+    fs.writeFileSync(path.join(memoryDir, 'other.md.mg-deadbeef.tmp'), 'not ours');
     await completePendingOps(deps);
     expect((await getMemoryOp(GROUP, 'crashed'))?.status).toBe('applied');
     expect(fs.readFileSync(path.join(memoryDir, 'notes.md'), 'utf8')).toBe('start\nlanded once');
-    expect(fs.readdirSync(memoryDir).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+    expect(fs.readdirSync(memoryDir).filter((n) => n.endsWith('.tmp'))).toEqual(['other.md.mg-deadbeef.tmp']);
+    expect(fs.readFileSync(path.join(memoryDir, 'other.md.mg-deadbeef.tmp'), 'utf8')).toBe('not ours');
   });
 
   it('a same-key row from another session, another payload, or a terminal state is a conflicting reuse', async () => {

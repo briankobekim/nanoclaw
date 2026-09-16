@@ -62,7 +62,7 @@ In `src/router.ts` `deliverToAgent`, for each wired agent, when `userId` ∈ `ge
   2. for `kind:'owner'`, build the block `\n- <YYYY-MM-DD> Kobe wrote (msg <message id>):\n  <text, each line indented two spaces>\n`;
   3. compute `before_sha256` (current file or `absent`) and `after_sha256` (planned result) and **commit them as `prepared` before touching the filesystem**;
   4. if the file already equals `after_sha256` → `applied`; if it no longer equals `before_sha256` → `conflict`, notify, stop;
-  5. mutate (`replace`/`append` = temp file + rename; `delete` = unlink);
+  5. mutate (`replace`/`append` = the op's own deterministic temp file `<name>.mg-<sha8>.tmp` + rename; `delete` = unlink). **Immediately before the rename or unlink** every path component is resolved again and the live target state must still equal `before_sha256`; otherwise the op is `conflict` (temp removed), never a write. Recovery after a crash removes only the exact temp path of each still-pending op; the host never deletes a file by name pattern;
   6. mark `applied`; `notifyAgent('memory written: <path>')`; log.
   A filesystem error increments `attempts`, logs, leaves the op `prepared`; after 10 attempts → `abandoned`, agent and owner notified.
 - `onDeny`: `notifyAgent('memory request denied: <reason>')`.
