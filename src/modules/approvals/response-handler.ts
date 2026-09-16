@@ -22,7 +22,7 @@ import {
   getSession,
   transitionPendingApprovalStatus,
 } from '../../db/sessions.js';
-import type { ResponsePayload } from '../../response-registry.js';
+import type { ResponseOutcome, ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
@@ -37,7 +37,7 @@ import {
 } from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
-export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
+export async function handleApprovalsResponse(payload: ResponsePayload): Promise<ResponseOutcome> {
   const approval = await getPendingApproval(payload.questionId);
   if (!approval) return false;
 
@@ -48,7 +48,8 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
       userId: payload.userId,
       channelType: payload.channelType,
     });
-    return true;
+    // Nothing changed: the row is still pending, so the card must stay actionable.
+    return 'refused';
   }
 
   if (approval.action === ONECLI_ACTION) {

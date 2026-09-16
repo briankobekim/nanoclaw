@@ -81,7 +81,8 @@ describe('approval response authorization', () => {
       threadId: null,
     });
 
-    expect(claimed).toBe(true);
+    // Claimed but REFUSED: nothing changed, so the bridge must leave the card actionable.
+    expect(claimed).toBe('refused');
     expect(handler).not.toHaveBeenCalled();
     expect(await getPendingApproval('appr-1')).toBeDefined();
   });

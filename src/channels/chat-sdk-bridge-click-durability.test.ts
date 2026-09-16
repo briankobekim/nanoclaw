@@ -25,6 +25,10 @@ import { closeDb, initTestDb, runMigrations } from '../db/index.js';
 import { createPendingApproval } from '../db/sessions.js';
 import type { ChannelSetup } from './adapter.js';
 import { createChatSdkBridge, handleForwardedEvent } from './chat-sdk-bridge.js';
+import { handleApprovalsResponse } from '../modules/approvals/response-handler.js';
+import { grantRole } from '../modules/permissions/db/user-roles.js';
+import { upsertUser } from '../modules/permissions/db/users.js';
+import { getPendingApproval } from '../db/sessions.js';
 
 type Recorder = ChannelSetup['onAction'];
 
@@ -124,6 +128,26 @@ describe('chat-sdk path: the click is recorded before the card is terminalized',
     const log = await click(() => undefined);
     expect(log).toEqual(['recorder-called', 'card-edited']);
   });
+
+  it('a refused click (unauthorized clicker) leaves the card actionable', async () => {
+    const log = await click(async () => 'refused' as const);
+    expect(log).toEqual(['recorder-called']);
+  });
+
+  it('through the REAL approvals handler: a stranger is refused and the row stays pending; the owner is recorded', async () => {
+    const real: Recorder = (questionId, value, userId) =>
+      handleApprovalsResponse({ questionId, value, userId, channelType: 'stub', platformId: '', threadId: null });
+    // No roles seeded: the clicker is nobody. Nothing changes and the card keeps its buttons.
+    expect(await click(real)).toEqual(['recorder-called']);
+    expect((await getPendingApproval('q-1'))?.status).toBe('pending');
+
+    // Now the clicker is the owner: the click is handled and the card is terminalized.
+    const now = new Date().toISOString();
+    await upsertUser({ id: 'stub:U1', kind: 'stub', display_name: 'Owner', created_at: now });
+    await grantRole({ user_id: 'stub:U1', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now });
+    expect(await click(real)).toEqual(['recorder-called', 'card-edited']);
+    expect(await getPendingApproval('q-1')).toBeUndefined();
+  });
 });
 
 describe('discord gateway path: deferred acknowledgement, record, then edit the original', () => {
@@ -174,6 +198,42 @@ describe('discord gateway path: deferred acknowledgement, record, then edit the 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toContain('/interactions/i-1/tok-1/callback');
     expect(calls[0]!.body).toEqual({ type: 6 });
+  });
+
+  it('a refused click is acknowledged (deferred) but the original is never edited', async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    stubFetch(calls);
+    await handleForwardedEvent(
+      interactionBody(),
+      {} as never,
+      setup(async () => 'refused' as const),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual({ type: 6 });
+  });
+
+  it('a non-2xx PATCH after a recorded click is logged, never thrown, and the click stays recorded', async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined });
+        return new Response('{}', { status: init?.method === 'PATCH' ? 500 : 200 });
+      }),
+    );
+    let recorded = 0;
+    await expect(
+      handleForwardedEvent(
+        interactionBody(),
+        {} as never,
+        setup(async () => {
+          recorded += 1;
+          return true;
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(recorded).toBe(1);
+    expect(calls.map((c) => c.method)).toEqual(['POST', 'PATCH']);
   });
 
   it('edits the original message with buttons removed only after the recorder resolved', async () => {

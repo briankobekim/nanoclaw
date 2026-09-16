@@ -25,10 +25,12 @@ export interface ChannelSetup {
    * Called when a user clicks a button/action in a card (e.g., ask_user_question response).
    * The bridge AWAITS this before it terminalizes the card: resolve (any value) once the
    * click has been durably handled; resolve `false` when no handler claimed it (a stale
-   * card, which the bridge still terminalizes); THROW when the click could not be recorded,
-   * in which case the bridge leaves the card actionable so the click can be retried.
+   * card, which the bridge still terminalizes); resolve `'refused'` when the owning handler
+   * rejected the click (unauthorized clicker: nothing changed, the card keeps its buttons);
+   * THROW when the click could not be recorded, in which case the bridge leaves the card
+   * actionable so the click can be retried.
    */
-  onAction(questionId: string, selectedOption: string, userId: string): void | Promise<boolean | void>;
+  onAction(questionId: string, selectedOption: string, userId: string): void | Promise<boolean | 'refused' | void>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

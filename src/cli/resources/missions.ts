@@ -105,9 +105,19 @@ function handoffShipping(status: HandoffStatus): 'no' | 'unknown' {
   return ['created', 'delivered', 'changes_required', 'review_blocked'].includes(status) ? 'no' : 'unknown';
 }
 
+const ABANDONED_PREFIX = 'abandoned by operator: ';
+
 function handoffMission(row: HandoffRow, names: Map<string, string>, superseded: boolean): MissionListRow {
   // A superseded round is finished work: its successor carries the thread
-  // forward, so it shows as terminal with nothing left to do.
+  // forward, so it shows as terminal with nothing left to do. An abandoned
+  // row was closed by the operator WITHOUT finishing: never "completed".
+  const abandoned = row.status === 'closed' && (row.closure_evidence ?? '').startsWith(ABANDONED_PREFIX);
+  const stage = superseded ? 'superseded' : abandoned ? 'abandoned' : handoffStage(row.status);
+  const state = abandoned
+    ? `closed: abandoned (${(row.closure_evidence ?? '').slice(ABANDONED_PREFIX.length)})`
+    : row.review_outcome
+      ? `${row.status}: ${row.review_outcome}`
+      : row.status;
   return {
     mission_id: row.id,
     kind: 'handoff',
@@ -115,9 +125,9 @@ function handoffMission(row: HandoffRow, names: Map<string, string>, superseded:
     owner: names.get(row.source_agent_group_id) ?? row.source_agent_group_id,
     class: 'unknown',
     project: row.project,
-    stage: superseded ? 'superseded' : handoffStage(row.status),
-    handoff_state: row.review_outcome ? `${row.status}: ${row.review_outcome}` : row.status,
-    next_action: superseded ? 'none' : handoffNextAction(row.status, row.id),
+    stage,
+    handoff_state: state,
+    next_action: superseded || abandoned ? 'none' : handoffNextAction(row.status, row.id),
     shipping_allowed: handoffShipping(row.status),
     updated_at: row.updated_at,
     revises: row.supersedes ?? '',

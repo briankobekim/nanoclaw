@@ -21,7 +21,14 @@ export interface ResponsePayload {
   threadId: string | null;
 }
 
-export type ResponseHandler = (payload: ResponsePayload) => Promise<boolean>;
+/**
+ * `true`: this handler owned the question and handled the click (the card may
+ * be terminalized). `false`: not this handler's question. `'refused'`: this
+ * handler owned the question but REJECTED the click (unauthorized clicker);
+ * nothing changed, so the card must keep its buttons for the right person.
+ */
+export type ResponseOutcome = boolean | 'refused';
+export type ResponseHandler = (payload: ResponsePayload) => Promise<ResponseOutcome>;
 
 const responseHandlers: ResponseHandler[] = [];
 

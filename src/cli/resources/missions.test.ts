@@ -317,6 +317,53 @@ describe('missions CLI', () => {
   });
 });
 
+describe('abandoned handoffs in the mission view', () => {
+  it('an operator-abandoned handoff is staged abandoned with its reason, never completed, whatever state it left', async () => {
+    await createHandoff('MISSION-ABANDON-CREATED');
+    await createHandoff('MISSION-ABANDON-UNTOUCHED');
+    const delivered = await createHandoff('MISSION-ABANDON-DELIVERED');
+    await dispatch(
+      {
+        id: 'd-ab',
+        command: 'handoffs-deliver',
+        args: { id: 'MISSION-ABANDON-DELIVERED', fingerprint: delivered.fingerprint },
+      },
+      agent(ATLAS),
+    );
+    for (const id of ['MISSION-ABANDON-CREATED', 'MISSION-ABANDON-DELIVERED']) {
+      const r = await dispatch(
+        { id: `ab-${id}`, command: 'handoffs-abandon', args: { id, reason: 'smoke test' } },
+        { caller: 'host' },
+      );
+      expect(r.ok).toBe(true);
+    }
+    const response = await dispatch(
+      { id: 'missions-abandoned', command: 'missions-list', args: {} },
+      { caller: 'host' },
+    );
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    const rows = response.data as Array<{
+      mission_id: string;
+      stage: string;
+      handoff_state: string;
+      next_action: string;
+    }>;
+    for (const id of ['MISSION-ABANDON-CREATED', 'MISSION-ABANDON-DELIVERED']) {
+      expect(rows).toContainEqual(
+        expect.objectContaining({
+          mission_id: id,
+          stage: 'abandoned',
+          handoff_state: 'closed: abandoned (smoke test)',
+          next_action: 'none',
+        }),
+      );
+    }
+    expect(rows.find((r) => r.mission_id === 'MISSION-ABANDON-UNTOUCHED')?.stage).toBe('awaiting_delivery');
+    expect(rows.some((r) => r.mission_id.startsWith('MISSION-ABANDON') && r.stage === 'completed')).toBe(false);
+  });
+});
+
 describe('handoff revisions in the mission view', () => {
   async function reviewed(id: string, outcome: 'CHANGES REQUIRED' | 'REVIEW BLOCKED'): Promise<void> {
     const { fingerprint } = await createHandoff(id);

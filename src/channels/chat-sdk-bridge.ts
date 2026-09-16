@@ -660,7 +660,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // the alternative (buttons gone, nothing recorded) strands the approval
         // with no sweep to revive it.
         try {
-          await setupConfig.onAction(questionId, selectedOption, userId);
+          if ((await setupConfig.onAction(questionId, selectedOption, userId)) === 'refused') {
+            log.warn('Click refused by its handler (unauthorized clicker); card left actionable', {
+              questionId,
+              userId,
+            });
+            return;
+          }
         } catch (err) {
           log.error('Action could not be recorded; card left actionable for a retry', { questionId, err });
           return;
@@ -1007,11 +1013,12 @@ async function discordInteractionCallback(
   type: 6 | 7,
   data?: Record<string, unknown>,
 ): Promise<void> {
-  await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
+  const res = await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data ? { type, data } : { type }),
   });
+  if (!res.ok) throw new Error(`interaction callback type ${type} returned HTTP ${res.status}`);
 }
 
 export async function handleForwardedEvent(
@@ -1094,20 +1101,35 @@ export async function handleForwardedEvent(
         log.warn('Failed to acknowledge interaction; continuing to record the click', { err });
       }
       try {
-        await setupConfig.onAction(questionId, selectedOption, user?.id || '');
+        if ((await setupConfig.onAction(questionId, selectedOption, user?.id || '')) === 'refused') {
+          log.warn('Click refused by its handler (unauthorized clicker); card left actionable', {
+            questionId,
+            userId: user?.id,
+          });
+          return;
+        }
       } catch (err) {
         log.error('Action could not be recorded; card left actionable for a retry', { questionId, err });
         return;
       }
+      // Recorded. Terminalize the original message; a failure here is logged
+      // loudly but is not fatal: the click is already durable, and a repeat
+      // click on the still-visible buttons is unclaimed (idempotent) and
+      // terminalizes the card on that pass.
       const applicationId = interaction.application_id as string | undefined;
       try {
-        await fetch(`https://discord.com/api/v10/webhooks/${applicationId}/${interactionToken}/messages/@original`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(terminal),
-        });
+        const res = await fetch(
+          `https://discord.com/api/v10/webhooks/${applicationId}/${interactionToken}/messages/@original`,
+          { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(terminal) },
+        );
+        if (!res.ok) {
+          log.error('Failed to terminalize interaction card after a recorded click', {
+            questionId,
+            status: res.status,
+          });
+        }
       } catch (err) {
-        log.error('Failed to update interaction', { err });
+        log.error('Failed to terminalize interaction card after a recorded click', { questionId, err });
       }
       return;
     }

@@ -22,7 +22,7 @@ import { enforceUpgradeTripwire } from './upgrade-state.js';
 // circular import cycle: src/index.ts imports src/modules/index.js for side
 // effects, and the modules call registerResponseHandler at top level — which
 // would hit a TDZ error if the array lived here.
-import { getResponseHandlers, type ResponsePayload } from './response-registry.js';
+import { getResponseHandlers, type ResponseOutcome, type ResponsePayload } from './response-registry.js';
 
 const hostAbortController = new AbortController();
 
@@ -32,9 +32,11 @@ const hostAbortController = new AbortController();
  * failure), and the bridge must then leave the card actionable rather than
  * strip its buttons over an unrecorded tap.
  */
-async function dispatchResponse(payload: ResponsePayload): Promise<boolean> {
+async function dispatchResponse(payload: ResponsePayload): Promise<ResponseOutcome> {
   for (const handler of getResponseHandlers()) {
-    if (await handler(payload)) return true;
+    const outcome = await handler(payload);
+    if (outcome === 'refused') return 'refused';
+    if (outcome) return true;
   }
   log.warn('Unclaimed response', { questionId: payload.questionId, value: payload.value });
   return false;

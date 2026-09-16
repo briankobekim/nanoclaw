@@ -29,7 +29,7 @@ import {
   type AccessGateResult,
 } from '../../router.js';
 import type { InboundEvent } from '../../channels/adapter.js';
-import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
+import { registerResponseHandler, type ResponsePayload, type ResponseOutcome } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
@@ -267,7 +267,7 @@ setSenderScopeGate(
  * Deny: delete the row (no "deny list" — a future message re-triggers a
  * fresh card per ACTION-ITEMS item 5 "no denial persistence").
  */
-async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome> {
   const row = await getPendingSenderApproval(payload.questionId);
   if (!row) return false;
 
@@ -289,7 +289,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
       clickerId,
       expectedApprover: row.approver_user_id,
     });
-    return true; // claim the response so it's not unclaimed-logged, but do nothing
+    return 'refused'; // claimed, but nothing changed: the card must keep its buttons
   }
   const approverId = clickerId;
   const approved = payload.value === 'approve';
@@ -451,7 +451,7 @@ async function wireApprovedChannel(
  *                     captures the reply and creates immediately)
  *   reject          — set denied_at, delete pending row
  */
-async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome> {
   const row = await getPendingChannelApproval(payload.questionId);
   if (!row) return false;
 
@@ -473,7 +473,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       expectedApprover: row.approver_user_id,
       reason: decision.reason,
     });
-    return true;
+    return 'refused'; // claimed, but nothing changed: the card must keep its buttons
   }
   const approverId = clickerId;
 

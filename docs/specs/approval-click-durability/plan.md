@@ -16,7 +16,8 @@ Out: any change to the approvals response handler, reason capture, OneCLI cards,
 
 - `dispatchResponse` (src/index.ts) returns `true` when a handler claimed the response and `false` when none did; a handler that throws is no longer swallowed, because a swallowed throw is exactly the "not recorded" case the bridge must see.
 - The bridge awaits `onAction`; on rejection it logs and returns without editing (chat-sdk) or without PATCHing (Discord). `false` (stale card) still terminalizes, since nothing can be lost.
-- A second click while the first is still being handled is harmless: the approvals handler transitions `pending → approved` exactly once and returns silently otherwise; a pending-question row is deleted by its first claim and the second click is unclaimed.
+- A handler that owns the question but REJECTS the click (unauthorized clicker) returns `'refused'`: the bridge leaves the card actionable, because the row is still pending and the right person must still be able to act.
+- A second click while the first is still being handled: the approvals handler transitions `pending → approved` exactly once and returns silently otherwise. The pending-question handler (interactive module, pre-existing) writes the answer to the agent's inbox and only then deletes its row, so two clicks that both pass the read can each append an answer; that duplicate is an accepted risk of this build, recorded in `run.md`, not a lost click.
 
 ## 4. Acceptance criteria (materialized in `src/channels/chat-sdk-bridge-click-durability.test.ts`, `src/modules/handoff-ledger/ledger.test.ts`, `src/cli/resources/handoffs.test.ts`)
 

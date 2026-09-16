@@ -13,11 +13,11 @@
 import { getDb, hasTable } from '../../db/connection.js';
 import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
-import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
+import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 
-async function handleInteractiveResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleInteractiveResponse(payload: ResponsePayload): Promise<ResponseOutcome> {
   if (!(await hasTable(getDb(), 'pending_questions'))) return false;
 
   const pq = await getPendingQuestion(payload.questionId);

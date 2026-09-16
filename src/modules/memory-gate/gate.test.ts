@@ -102,7 +102,7 @@ function request(overrides: Record<string, unknown> = {}): Record<string, unknow
   };
 }
 
-async function approve(approvalId: string): Promise<boolean> {
+async function approve(approvalId: string): Promise<Awaited<ReturnType<typeof handleApprovalsResponse>>> {
   return handleApprovalsResponse({
     questionId: approvalId,
     value: 'approve',
