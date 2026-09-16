@@ -165,6 +165,17 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:handoff-stall-ping:end
 
+  // Complete queued memory writes durably (the delivery-time kick is only a
+  // fast path). Central-DB scan, once per tick.
+  // MODULE-HOOK:memory-gate-ops-sweep:start
+  try {
+    const { memoryGateSweep } = await import('./modules/memory-gate/index.js');
+    await memoryGateSweep();
+  } catch (err) {
+    log.error('Memory gate sweep failed', { err });
+  }
+  // MODULE-HOOK:memory-gate-ops-sweep:end
+
   setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
 }
 

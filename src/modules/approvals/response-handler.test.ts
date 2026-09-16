@@ -263,3 +263,57 @@ describe('approval response authorization', () => {
     expect(await getPendingApproval('appr-4')).toBeUndefined();
   });
 });
+
+describe('retained approvals (memory-provenance-gate plan §4.3)', () => {
+  it('a handler that returns retained puts the row back to pending and leaves the card actionable', async () => {
+    await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const handler = vi.fn().mockResolvedValue({ outcome: 'retained' });
+    registerApprovalHandler('retained_action', handler);
+    await createPendingApproval({
+      approval_id: 'appr-retained',
+      session_id: 'sess-1',
+      request_id: 'appr-retained',
+      action: 'retained_action',
+      payload: JSON.stringify({ request_id: 'r1' }),
+      created_at: now(),
+      title: 'Retained',
+      options_json: JSON.stringify([]),
+    });
+
+    const claimed = await handleApprovalsResponse({
+      questionId: 'appr-retained',
+      value: 'approve',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+
+    expect(claimed).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+    const row = await getPendingApproval('appr-retained');
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('pending');
+
+    // A second click resolves it normally once the handler no longer retains.
+    handler.mockResolvedValue(undefined);
+    await handleApprovalsResponse({
+      questionId: 'appr-retained',
+      value: 'approve',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+    expect(await getPendingApproval('appr-retained')).toBeUndefined();
+  });
+});

@@ -118,7 +118,15 @@ async function handleRegisteredApproval(
 
   const payload = JSON.parse(approval.payload);
   try {
-    await handler({ session, payload, approval, userId, notify });
+    const result = await handler({ session, payload, approval, userId, notify });
+    if (result && result.outcome === 'retained') {
+      // The domain could not apply the grant right now (maintenance barrier)
+      // and asked to keep it: back to pending, card still actionable, no
+      // resolution notice.
+      await transitionPendingApprovalStatus(approval.approval_id, 'approved', 'pending');
+      log.info('Approval retained by handler', { approvalId: approval.approval_id, action: approval.action });
+      return;
+    }
     log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });
   } catch (err) {
     log.error('Approval handler threw', { approvalId: approval.approval_id, action: approval.action, err });

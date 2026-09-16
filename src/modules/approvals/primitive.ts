@@ -71,7 +71,16 @@ export interface ApprovalHandlerContext {
   notify: (text: string) => Promise<void>;
 }
 
-export type ApprovalHandler = (ctx: ApprovalHandlerContext) => Promise<void>;
+/**
+ * A handler may return `{ outcome: 'retained' }` to keep the grant: the row
+ * goes back to `pending` and the card stays actionable (used while a domain
+ * is quiesced for maintenance). Returning nothing resolves the approval.
+ */
+export interface ApprovalHandlerResult {
+  outcome: 'retained';
+}
+
+export type ApprovalHandler = (ctx: ApprovalHandlerContext) => Promise<void | ApprovalHandlerResult>;
 
 const approvalHandlers = new Map<string, ApprovalHandler>();
 

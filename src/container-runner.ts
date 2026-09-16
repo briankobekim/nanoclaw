@@ -38,6 +38,8 @@ import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './dr
 import { getGatewayProvider, type GatewayContribution } from './gateway-providers/index.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
+import { MEMORY_CONTAINER_PATH, assertNoWritableMemoryAlias, listProtectedMemoryRoots } from './memory-mount-guard.js';
+import { prepareMemoryRoot } from './memory-scaffold.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -500,6 +502,23 @@ export async function buildMounts(
     scope,
   });
 
+  // Memory — nested RO overlay on top of the RW group dir (same pattern as
+  // container.json below). Agents read memory; only the host writes it, through
+  // the provenance gate. The preflight walks the tree for symlinks, hard links
+  // and wrong types and scaffolds what is missing; a refusal throws and aborts
+  // the spawn. See docs/specs/memory-provenance-gate/plan.md §4.2.
+  // The owner notice is loaded lazily: memory-gate/notify reaches delivery.ts,
+  // which imports this module, and buildMounts is already async.
+  const { notifyOwners } = await import('./modules/memory-gate/notify.js');
+  await prepareMemoryRoot(groupDir, { notifyOwner: notifyOwners });
+  mounts.push({
+    hostPath: path.join(groupDir, 'memory'),
+    containerPath: MEMORY_CONTAINER_PATH,
+    readonly: true,
+    mountClass: 'group-state',
+    scope,
+  });
+
   // container.json — nested RO mount on top of RW group dir so the agent can
   // read its config but cannot modify it. Composed per group, so 'group-state'
   // read-only rather than 'install-surface': the install-surface rule is an
@@ -616,6 +635,11 @@ export async function buildMounts(
     mounts.push(...providerContribution.mounts.map((m) => ({ ...m, mountClass: 'allowlisted-extra' as const, scope })));
   }
 
+  // No writable mount may reach any group's memory (by host source or by
+  // container destination), and the RO memory overlay must be present after
+  // both ancestors it shadows. Throws and aborts the spawn otherwise.
+  assertNoWritableMemoryAlias(mounts, listProtectedMemoryRoots());
+
   return mounts;
 }
 
@@ -699,6 +723,15 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const runAs = hostUid != null && hostUid !== 0 ? { uid: hostUid, gid: hostGid ?? hostUid } : undefined;
   if (runAs) env.HOME = '/home/node';
 
+  // Gateway mounts merge here, after buildMounts already ran its check, so the
+  // memory alias guard runs once more on the FINAL list the driver will see.
+  const mergedMounts = mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []);
+  assertNoWritableMemoryAlias(
+    mergedMounts.map((m) => ({ hostPath: m.hostPath, containerPath: m.containerPath, readonly: m.mode === 'ro' })),
+    listProtectedMemoryRoots(),
+    { requireOverlay: false },
+  );
+
   const agent: ContainerSpec = {
     role: 'agent',
     // Composition resolves the image; drivers never build and never resolve.
@@ -708,7 +741,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // 'standard' posture's PID-1 requirement onto this: Docker adds `--init`.
     command: ['bash', '-c'],
     args: ['exec bun run /app/src/index.ts'],
-    mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
+    mounts: mergedMounts,
     contributedEnv,
   };
 

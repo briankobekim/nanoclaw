@@ -32,3 +32,6 @@ import './handoff-ledger/index.js';
 // Verifier loads after the ledger: its migration's foreign key points at
 // `handoffs(id)`, and module migrations run in import order.
 import './verifier/index.js';
+// Memory provenance gate: registers the memory_write door and its approval
+// handler; depends on approvals, permissions, and delivery being loaded.
+import './memory-gate/index.js';

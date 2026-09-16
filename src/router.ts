@@ -29,6 +29,10 @@ import {
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { fileOwnerStatement, isOwnerFilingMessage } from './modules/memory-gate/owner-filing.js';
+import { classifyTrust, parseContentSafe, stampTrust } from './modules/memory-gate/trust.js';
+import { canAccessAgentGroup } from './modules/permissions/access.js';
+import { getOwners } from './modules/permissions/db/user-roles.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
@@ -586,6 +590,35 @@ async function deliverToAgent(
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+
+  // Memory provenance gate (docs/specs/memory-provenance-gate): label the
+  // message with a host-computed trust value the agent can see, and file an
+  // owner message that starts with `remember:` BEFORE it is delivered, keyed
+  // by this per-agent message id so a retry of the same event is idempotent.
+  const parsedContent = parseContentSafe(event.message.content);
+  const owners = new Set((await getOwners()).map((row) => row.user_id));
+  const trust = await classifyTrust({
+    userId,
+    channelType: event.channelType,
+    content: parsedContent,
+    owners,
+    isKnown: async (id) => (await canAccessAgentGroup(id, agent.agent_group_id)).allowed,
+  });
+  if (trust === 'owner' && isOwnerFilingMessage(parsedContent.text)) {
+    if (event.message.id && event.message.id.length > 0) {
+      await fileOwnerStatement({
+        agentGroupId: agent.agent_group_id,
+        sessionId: session.id,
+        perAgentMessageId: messageId,
+        text: parsedContent.text,
+      });
+    } else {
+      log.warn('memory-gate: owner filing skipped; inbound event has no platform message id', {
+        agentGroupId: agent.agent_group_id,
+      });
+    }
+  }
+
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
     kind: event.message.kind,
@@ -593,7 +626,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content: stampTrust(event.message.content, trust),
     trigger: wake,
   });
 
