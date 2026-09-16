@@ -200,35 +200,37 @@ describe('M1 prepareMemoryRoot refuses any symlink in the tree, wrong types at s
     expect(d.notifyOwner).not.toHaveBeenCalled();
   });
 
-  it('a scaffold file whose write or fsync fails is removed, so the next run recreates and fsyncs it', async () => {
+  it('a scaffold file is either fully installed or absent: write, fsync, close and cleanup failures all leave no destination', async () => {
     const { groupDir, memory } = fixture();
     const d = deps();
-    const realFsync = fs.fsyncSync;
-    let failFileFsyncFor: string | null = 'owner-statements.md';
-    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+    const owner = path.join(memory, 'owner-statements.md');
+    const definition = path.join(memory, 'system', 'definition.md');
+    const tempsInGroupDir = () => fs.readdirSync(groupDir).filter((n) => n.startsWith('.memory-scaffold-'));
+    const isScaffoldTemp = (fd: number) => {
       const st = fs.fstatSync(fd);
-      const victim = failFileFsyncFor ? path.join(memory, failFileFsyncFor) : null;
-      if (victim && st.isFile() && fs.existsSync(victim) && st.ino === fs.statSync(victim).ino) {
-        throw new Error('EIO: injected file fsync failure');
-      }
+      return st.isFile() && tempsInGroupDir().some((n) => fs.statSync(path.join(groupDir, n)).ino === st.ino);
+    };
+
+    // 1. fsync of the temp fails: nothing installed, no temp left, next run installs.
+    const realFsync = fs.fsyncSync;
+    let failFileFsync = true;
+    const fsyncSpy = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      if (failFileFsync && isScaffoldTemp(fd)) throw new Error('EIO: injected file fsync failure');
       return realFsync(fd);
     });
-
-    // First run: owner-statements.md is created, its fsync fails, the run throws and the file is gone.
     await expect(prepareMemoryRoot(groupDir, d)).rejects.toThrow(/injected file fsync failure/);
-    expect(fs.existsSync(path.join(memory, 'owner-statements.md'))).toBe(false);
-    // Second run: the file is created again and, with a healthy fsync, kept.
-    failFileFsyncFor = null;
+    expect(fs.existsSync(path.join(memory, 'index.md'))).toBe(false);
+    expect(tempsInGroupDir()).toEqual([]);
+    failFileFsync = false;
     await prepareMemoryRoot(groupDir, d);
-    expect(fs.readFileSync(path.join(memory, 'owner-statements.md'), 'utf8')).toBe(
-      '---\ntype: owner-statements\n---\n',
-    );
+    expect(fs.readFileSync(owner, 'utf8')).toBe('---\ntype: owner-statements\n---\n');
+    fsyncSpy.mockRestore();
 
-    // A template whose WRITE fails part-way is removed too, and recreated byte-identical next time.
-    fs.rmSync(path.join(memory, 'system', 'definition.md'));
+    // 2. a partial write: the short temp is discarded, the destination never appears.
+    fs.rmSync(definition);
     const realWrite = fs.writeFileSync;
     let failWrite = true;
-    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
       if (failWrite && typeof file === 'number') {
         failWrite = false;
         realWrite(file, 'partial');
@@ -237,11 +239,58 @@ describe('M1 prepareMemoryRoot refuses any symlink in the tree, wrong types at s
       return realWrite(file, data, options);
     });
     await expect(prepareMemoryRoot(groupDir, d)).rejects.toThrow(/injected partial write/);
-    expect(fs.existsSync(path.join(memory, 'system', 'definition.md'))).toBe(false);
+    expect(fs.existsSync(definition)).toBe(false);
+    expect(tempsInGroupDir()).toEqual([]);
+    writeSpy.mockRestore();
     await prepareMemoryRoot(groupDir, d);
-    expect(fs.readFileSync(path.join(memory, 'system', 'definition.md'), 'utf8')).toBe(
+    expect(fs.readFileSync(definition, 'utf8')).toBe(
       fs.readFileSync(path.join(TEMPLATES, 'system', 'definition.md'), 'utf8'),
     );
+
+    // 3. close fails after a good write: still nothing installed, no temp left.
+    fs.rmSync(definition);
+    const realClose = fs.closeSync;
+    let failClose = true;
+    const closeSpy = vi.spyOn(fs, 'closeSync').mockImplementation((fd: number) => {
+      if (failClose && isScaffoldTemp(fd)) {
+        failClose = false;
+        realClose(fd);
+        throw new Error('EIO: injected close failure');
+      }
+      return realClose(fd);
+    });
+    await expect(prepareMemoryRoot(groupDir, d)).rejects.toThrow(/injected close failure/);
+    expect(fs.existsSync(definition)).toBe(false);
+    expect(tempsInGroupDir()).toEqual([]);
+    closeSpy.mockRestore();
+
+    // 4. the temp's unlink fails AFTER a successful install: the file has two
+    //    names; the next preflight removes the temp by inode and does not refuse.
+    const realUnlink = fs.unlinkSync;
+    let failUnlink = true;
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation((p) => {
+      if (failUnlink && String(p).includes('.memory-scaffold-')) {
+        failUnlink = false;
+        throw new Error('EIO: injected unlink failure');
+      }
+      return realUnlink(p);
+    });
+    await prepareMemoryRoot(groupDir, d);
+    expect(fs.readFileSync(definition, 'utf8')).toBe(
+      fs.readFileSync(path.join(TEMPLATES, 'system', 'definition.md'), 'utf8'),
+    );
+    expect(tempsInGroupDir()).toHaveLength(1);
+    expect(fs.statSync(definition).nlink).toBe(2);
+    unlinkSpy.mockRestore();
+    await prepareMemoryRoot(groupDir, d);
+    expect(tempsInGroupDir()).toEqual([]);
+    expect(fs.statSync(definition).nlink).toBe(1);
+
+    // A leftover temp that is NOT one of our installed files is left alone.
+    const stranger = path.join(groupDir, '.memory-scaffold-0123456789abcdef.tmp');
+    fs.writeFileSync(stranger, 'not ours');
+    await prepareMemoryRoot(groupDir, d);
+    expect(fs.readFileSync(stranger, 'utf8')).toBe('not ours');
     expect(d.notifyOwner).not.toHaveBeenCalled();
   });
 
@@ -261,7 +310,10 @@ describe('M1 prepareMemoryRoot refuses any symlink in the tree, wrong types at s
     fs.writeFileSync(target, 'untouched\n');
     fs.symlinkSync(target, path.join(memory, 'x.md'));
 
-    expect(() => createFileNoFollow(path.join(memory, 'x.md'), 'injected\n')).toThrow(/EEXIST|ELOOP/);
+    expect(() => createFileNoFollow(path.join(memory, 'x.md'), 'injected\n', groupDir)).toThrow(/EEXIST|ELOOP/);
     expect(fs.readFileSync(target, 'utf8')).toBe('untouched\n');
+    // The symlink itself is untouched too, and no temp is left in the group directory.
+    expect(fs.lstatSync(path.join(memory, 'x.md')).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(groupDir).filter((n) => n.startsWith('.memory-scaffold-'))).toEqual([]);
   });
 });

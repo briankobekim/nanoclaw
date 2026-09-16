@@ -12,6 +12,7 @@
  * opens its target without following symlinks, so a link created between
  * preflight and write cannot redirect it.
  */
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -67,32 +68,77 @@ function lstatOrNull(p: string): fs.Stats | null {
   }
 }
 
+/** Scaffold temp files live in the group directory (outside `memory/`), named so a leftover is recognizable. */
+const SCAFFOLD_TEMP_PREFIX = '.memory-scaffold-';
+const SCAFFOLD_TEMP_RE = /^\.memory-scaffold-[0-9a-f]{16}\.tmp$/;
+
 /**
- * Create `p` with `content`, refusing to follow a symlink at `p`
- * (`O_CREAT|O_EXCL` already refuses a symlink; `O_NOFOLLOW` is belt and
- * braces). Throws EEXIST when anything is already there, so callers only ever
- * create — never overwrite.
+ * Create `p` with `content` so that the destination is either fully written
+ * and fsynced or absent, never a short or unsynced file: the bytes go to an
+ * exclusive temp file in `tempDir`, are fsynced there, and are then installed
+ * with `link` (which fails with EEXIST when anything, a symlink included, is
+ * already at `p`: callers only ever create, never overwrite or follow). The
+ * temp name is removed whatever happens; if that last unlink fails after a
+ * successful install the file briefly has two names, which the next preflight
+ * heals by inode (see `healScaffoldTemps`).
  */
-export function createFileNoFollow(p: string, content: string | Buffer): void {
+export function createFileNoFollow(p: string, content: string | Buffer, tempDir: string): void {
   const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
-  const fd = fs.openSync(p, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+  const tmp = path.join(tempDir, `${SCAFFOLD_TEMP_PREFIX}${randomBytes(8).toString('hex')}.tmp`);
+  const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+  let open = true;
   try {
     fs.writeFileSync(fd, content);
     fs.fsyncSync(fd);
-  } catch (err) {
-    // The file is ours (created exclusively a moment ago) and is either short
-    // or unsynced: remove it so the next run must create and fsync it again
-    // instead of accepting it as already present.
+    open = false;
     fs.closeSync(fd);
-    try {
-      fs.unlinkSync(p);
-      // eslint-disable-next-line no-catch-all/no-catch-all -- the original failure is what matters; a failed cleanup is logged with it
-    } catch (cleanupErr) {
-      log.error('memory scaffold: could not remove a partially written file', { path: p, err: cleanupErr });
+    fs.linkSync(tmp, p);
+  } catch (err) {
+    if (open) {
+      try {
+        fs.closeSync(fd);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- the original failure is what matters; the descriptor is gone either way
+      } catch (closeErr) {
+        log.warn('memory scaffold: close failed after a failed write', { path: tmp, err: closeErr });
+      }
     }
     throw err;
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- a leftover temp is inert (outside memory/) and healed or ignored by the next preflight
+    } catch (cleanupErr) {
+      log.warn('memory scaffold: could not remove a temp file', { path: tmp, err: cleanupErr });
+    }
   }
-  fs.closeSync(fd);
+}
+
+/**
+ * A crash or failed unlink between `link` and the temp's removal leaves a
+ * scaffold file with two names; the walk would refuse it as hard-linked.
+ * Remove only a temp that is PROVEN ours: same device and inode as one of
+ * the files this scaffold installs. Any other leftover is left alone.
+ */
+function healScaffoldTemps(groupDir: string, memoryPath: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(groupDir).filter((name) => SCAFFOLD_TEMP_RE.test(name));
+    // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable group dir is reported by the checks that follow
+  } catch {
+    return;
+  }
+  if (names.length === 0) return;
+  const installed = [...TEMPLATE_FILES, 'owner-statements.md']
+    .map((rel) => lstatOrNull(path.join(memoryPath, rel)))
+    .filter((st): st is fs.Stats => st !== null && st.isFile());
+  for (const name of names) {
+    const tmp = path.join(groupDir, name);
+    const st = lstatOrNull(tmp);
+    if (!st || !st.isFile() || st.nlink < 2) continue;
+    if (!installed.some((target) => target.ino === st.ino && target.dev === st.dev)) continue;
+    log.warn('memory scaffold: removing the second name of an installed scaffold file', { path: tmp });
+    fs.unlinkSync(tmp);
+  }
 }
 
 /**
@@ -149,6 +195,8 @@ export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = 
     return refuse(`memory root resolves outside the group directory (${realGroupDir})`, memoryPath);
   }
 
+  healScaffoldTemps(groupDir, memoryPath);
+
   // The two fixed entries have fixed types when present.
   const systemDir = path.join(memoryPath, 'system');
   const systemStat = lstatOrNull(systemDir);
@@ -196,16 +244,20 @@ export async function prepareMemoryRoot(groupDir: string, deps: PreflightDeps = 
   }
   for (const rel of TEMPLATE_FILES) {
     const destination = path.join(memoryPath, rel);
+    // Present already (the walk above verified its type): nothing to write.
+    // A file that appears between this check and the install still surfaces
+    // as EEXIST from the exclusive install, never as a rewrite.
+    if (lstatOrNull(destination) !== null) continue;
     assertRealDirectory(path.dirname(destination));
     try {
-      createFileNoFollow(destination, fs.readFileSync(path.join(TEMPLATES_DIR, rel)));
+      createFileNoFollow(destination, fs.readFileSync(path.join(TEMPLATES_DIR, rel)), groupDir);
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
   }
   if (ownerStat === null) {
     assertRealDirectory(memoryPath);
-    createFileNoFollow(ownerStatements, OWNER_STATEMENTS_FRONTMATTER);
+    createFileNoFollow(ownerStatements, OWNER_STATEMENTS_FRONTMATTER, groupDir);
   }
   fsyncDirectory(systemDir);
   fsyncDirectory(memoryPath);
