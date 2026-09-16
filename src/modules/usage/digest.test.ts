@@ -108,6 +108,7 @@ interface TurnSeed {
   cacheRead?: number;
   cacheCreation?: number;
   occurredAt: Date;
+  ingestedAt?: Date;
   modelUsageJson?: string;
 }
 
@@ -131,7 +132,7 @@ async function seedTurn(seed: TurnSeed): Promise<void> {
     seed.cacheCreation ?? 0,
     seed.modelUsageJson ?? '{}',
     iso(seed.occurredAt),
-    iso(seed.occurredAt),
+    iso(seed.ingestedAt ?? seed.occurredAt),
   );
 }
 
@@ -333,6 +334,26 @@ describe('U5 the digest sends once per owner per local date after the configured
       last_sent_local_date: '2026-09-18',
       window_end: iso(lateSend),
     });
+  });
+
+  it('a record ingested after a send, for a turn that occurred before it, appears in the next digest (window is an ingestion cursor)', async () => {
+    const firstSend = ny('2026-09-15T21:00');
+    await tick(firstSend);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    // A delivery retry lands the record at 21:01 for a turn that ran at 20:59.
+    await seedTurn({
+      turnId: 'late-1',
+      group: ATLAS,
+      cost: 0.5,
+      input: 50,
+      output: 5,
+      occurredAt: ny('2026-09-15T20:59'),
+      ingestedAt: ny('2026-09-15T21:01'),
+    });
+    await tick(ny('2026-09-16T21:00'));
+    expect(deliver).toHaveBeenCalledTimes(4);
+    const text = textOf(deliver.mock.calls[2] as unknown[]);
+    expect(text).toContain('Atlas — 1 turn, 50 in / 5 out, 0 cache read, $0.50');
   });
 
   it('sendDigestTo rejects on a hung adapter instead of resolving', async () => {

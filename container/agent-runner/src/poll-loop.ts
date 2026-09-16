@@ -435,6 +435,12 @@ export async function processQuery(
   // when a turn is still pending, so a stream that dies AFTER its result
   // never yields a second row for the same turn.
   let turnPending = true;
+  // Batches awaiting their provider turn's result, FIFO: the SDK answers pushed
+  // prompts in order, one result each. A batch is completed only when ITS
+  // result has been recorded (plan §4.1); a crash before that re-runs the
+  // batch as a genuine second turn. Nudge pushes enqueue an empty batch so
+  // results and batches stay aligned.
+  const pendingBatches: string[][] = [initialBatchIds];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -527,7 +533,8 @@ export async function processQuery(
         query.push(prompt);
         turnPending = true;
         archivePrompts.push(prompt);
-        markCompleted(keptIds);
+        // Completed when this follow-up's own result is recorded, not at the push.
+        pendingBatches.push(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -599,7 +606,8 @@ export async function processQuery(
         // must exist before the batch is acked and before any reply goes out.
         await recordTurn({ usage: event.usage, isError: event.isError === true });
         turnPending = false;
-        markCompleted(initialBatchIds);
+        const completedBatch = pendingBatches.shift() ?? [];
+        if (completedBatch.length > 0) markCompleted(completedBatch);
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -661,6 +669,7 @@ export async function processQuery(
                   `Please re-send your response with the correct wrapping.</system>`,
               );
               turnPending = true;
+              pendingBatches.push([]);
             }
             if (willRetryTaskBlocks) {
               taskBlockNudged = true;
@@ -669,6 +678,7 @@ export async function processQuery(
                 .join(', ');
               query.push(buildTaskBlockNudge(taskBlocks, names));
               turnPending = true;
+              pendingBatches.push([]);
             }
             // A retry result (wrapping or task-block nudge) answers the SAME
             // user prompt — keep it queued so the retry archives against it,
@@ -688,6 +698,17 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+      }
+    }
+    // The stream ended with neither a result nor an exception (an abort
+    // during an active turn, e.g. /clear). Tokens were still spent: record an
+    // unreported error turn so the turn is never silently omitted.
+    if (turnPending) {
+      turnPending = false;
+      try {
+        await recordTurn({ isError: true });
+      } catch (recordErr) {
+        log(`record_usage write failed: ${recordErr instanceof Error ? recordErr.message : String(recordErr)}`);
       }
     }
   } catch (err) {

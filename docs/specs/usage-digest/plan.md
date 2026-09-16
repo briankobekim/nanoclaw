@@ -101,3 +101,4 @@ Host (vitest):
 - Digest hour default 21:00 install-local and delivery to every owner: Brian to confirm or change (`NANOCLAW_DIGEST_HOUR`).
 - The SDK's `total_cost_usd` is the SDK's own estimate at list price; it is reported as given, not reconciled with any invoice. Measurements remain container-reported: a compromised agent could under- or over-state its own tokens within the bounds; attribution, provider and model cannot be forged.
 - The first digest's window starts at the first recorded turn; earlier turns are not counted.
+- Residual (implementation review): a crash in the seconds between a streamed mid-turn reply and its result loses that turn's record (one under-counted turn); buffering streamed replies was rejected as a product change.

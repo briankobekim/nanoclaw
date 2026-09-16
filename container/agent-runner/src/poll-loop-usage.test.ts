@@ -194,6 +194,22 @@ describe('a terminal provider failure with no result still records the turn', ()
     expectIso8601(payload.occurred_at);
   });
 
+  it('a stream that ends with neither result nor exception (an abort) still records one unreported error turn', async () => {
+    insertMessage('m1', { sender: 'A', text: 'hi' });
+    const query = makeQuery(async function* () {
+      yield { type: 'init', continuation: 'sess-1' };
+      // The provider generator returns: no result, no throw (query.abort() shape).
+    });
+
+    await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const records = recordRows();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.payload.reported).toBe(false);
+    expect(records[0]!.payload.is_error).toBe(true);
+    expect('usage' in records[0]!.payload).toBe(false);
+  });
+
   it('exactly one record per turn: a stream exception after a completed result does not record twice', async () => {
     insertMessage('m1', { sender: 'A', text: 'hi' });
     const query = makeQuery(async function* () {

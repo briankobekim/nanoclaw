@@ -160,7 +160,7 @@ async function aggregateTurns(windowStart: Date, windowEnd: Date): Promise<Map<s
             COALESCE(SUM(cache_creation_tokens), 0)              AS cache_creation_tokens,
             MAX(CASE WHEN reported = 0 THEN provider END)        AS unreported_provider
        FROM usage_turns
-      WHERE occurred_at > ? AND occurred_at <= ?
+      WHERE ingested_at > ? AND ingested_at <= ?
       GROUP BY agent_group_id`,
     windowStart.toISOString(),
     windowEnd.toISOString(),
@@ -280,7 +280,7 @@ export async function buildDigestText(args: DigestBuildArgs): Promise<string> {
 
 /** Window start for an owner's first digest: the earliest record, or the last 24 h when there is none. */
 async function firstWindowStart(now: Date): Promise<Date> {
-  const row = await getDb().get<{ earliest: string | null }>('SELECT MIN(occurred_at) AS earliest FROM usage_turns');
+  const row = await getDb().get<{ earliest: string | null }>('SELECT MIN(ingested_at) AS earliest FROM usage_turns');
   const earliest = row?.earliest ? Date.parse(row.earliest) : Number.NaN;
   // The window is exclusive at its start; step back so the earliest record is inside it.
   return Number.isNaN(earliest) ? new Date(now.getTime() - DAY_MS) : new Date(earliest - 1);
