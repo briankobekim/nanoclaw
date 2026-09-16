@@ -14,6 +14,9 @@ export const memoryGateMigration: ModuleMigration = {
   up: async (db) => {
     await db.exec(`
       CREATE TABLE memory_write_ops (
+        -- Durable insertion order, assigned by the database inside the insert
+        -- statement; completion order never depends on the wall clock.
+        seq               INTEGER NOT NULL UNIQUE,
         agent_group_id    TEXT NOT NULL,
         request_id        TEXT NOT NULL,
         session_id        TEXT NOT NULL,
@@ -34,7 +37,7 @@ export const memoryGateMigration: ModuleMigration = {
         PRIMARY KEY (agent_group_id, request_id)
       );
 
-      CREATE INDEX idx_memory_write_ops_status ON memory_write_ops(status, created_at);
+      CREATE INDEX idx_memory_write_ops_status ON memory_write_ops(status, seq);
 
       CREATE TABLE memory_gate_state (
         id          INTEGER PRIMARY KEY CHECK (id = 1),

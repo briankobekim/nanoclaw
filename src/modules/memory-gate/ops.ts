@@ -45,6 +45,8 @@ export interface MemoryOpInput {
 }
 
 export interface MemoryOpRow {
+  /** Database-assigned insertion order: the completion order within a group. */
+  seq: number;
   agent_group_id: string;
   request_id: string;
   session_id: string;
@@ -94,22 +96,15 @@ function errorMessage(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 /**
- * `created_at` is the completion order within a group, so two ops enqueued in
- * the same millisecond must still sort in dispatch order.
+ * `seq` is the completion order within a group. It is assigned by the
+ * database inside the insert statement (one writer at a time), so it survives
+ * restarts and backward clock corrections; `created_at` is informational.
  */
-let lastCreatedMs = 0;
-function nextCreatedAt(): string {
-  let ms = Date.now();
-  if (ms <= lastCreatedMs) ms = lastCreatedMs + 1;
-  lastCreatedMs = ms;
-  return new Date(ms).toISOString();
-}
-
 const INSERT_OP_SQL = `
   INSERT INTO memory_write_ops
-    (agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256, owner_message_id,
+    (seq, agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256, owner_message_id,
      status, attempts, created_at, updated_at)
-  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?
+  SELECT (SELECT COALESCE(MAX(seq), 0) + 1 FROM memory_write_ops), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?
   WHERE NOT EXISTS (SELECT 1 FROM memory_gate_state WHERE quiesced = 1)`;
 
 /**
@@ -120,7 +115,7 @@ const INSERT_OP_SQL = `
  */
 export async function enqueueMemoryOp(input: MemoryOpInput): Promise<'inserted' | 'exists' | 'quiesced'> {
   const contentSha = sha256(input.content ?? '');
-  const now = nextCreatedAt();
+  const now = new Date().toISOString();
   let changes = 0;
   let raceError: unknown;
   try {
@@ -174,12 +169,9 @@ export async function getMemoryOp(agentGroupId: string, requestId: string): Prom
 
 export async function listOps(status?: MemoryOpStatus): Promise<MemoryOpRow[]> {
   if (status) {
-    return getDb().all<MemoryOpRow>(
-      'SELECT * FROM memory_write_ops WHERE status = ? ORDER BY created_at, agent_group_id, request_id',
-      status,
-    );
+    return getDb().all<MemoryOpRow>('SELECT * FROM memory_write_ops WHERE status = ? ORDER BY seq', status);
   }
-  return getDb().all<MemoryOpRow>('SELECT * FROM memory_write_ops ORDER BY created_at, agent_group_id, request_id');
+  return getDb().all<MemoryOpRow>('SELECT * FROM memory_write_ops ORDER BY seq');
 }
 
 /** The provenance block appended to owner-statements.md for a `remember:` message. */
@@ -234,7 +226,7 @@ export async function completePendingOps(deps: CompletionDeps = liveDeps): Promi
 async function pendingOpsFor(groupId: string): Promise<MemoryOpRow[]> {
   return getDb().all<MemoryOpRow>(
     `SELECT * FROM memory_write_ops WHERE agent_group_id = ? AND status IN ('queued', 'prepared')
-     ORDER BY created_at, request_id`,
+     ORDER BY seq`,
     groupId,
   );
 }
@@ -338,7 +330,7 @@ async function completeGroup(groupId: string, deps: CompletionDeps): Promise<voi
         err,
       });
     }
-    // Creation order is the contract: if this op is still pending after its
+    // Insertion order is the contract: if this op is still pending after its
     // attempt, a later op must not overtake it (two appends to one file would
     // otherwise land out of order and turn the earlier one into a conflict).
     const after = await getMemoryOp(op.agent_group_id, op.request_id);

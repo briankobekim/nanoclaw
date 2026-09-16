@@ -109,9 +109,9 @@ interface DirectRow {
 async function insertRow(row: DirectRow): Promise<void> {
   const created = row.created_at ?? '2026-09-15T08:00:00.000Z';
   await getDb().run(
-    `INSERT INTO memory_write_ops (agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256,
+    `INSERT INTO memory_write_ops (seq, agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256,
        owner_message_id, before_sha256, after_sha256, status, attempts, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES ((SELECT COALESCE(MAX(seq), 0) + 1 FROM memory_write_ops), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     GROUP,
     row.request_id,
     SESSION,
@@ -403,9 +403,9 @@ describe('memory-gate ops completion', () => {
     await enqueueMemoryOp(free('p6', 'system', 'replace', 'x'));
     await enqueueMemoryOp(free('p7', 'system/definition.md', 'replace', 'redefined'));
     await getDb().run(
-      `INSERT INTO memory_write_ops (agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256,
+      `INSERT INTO memory_write_ops (seq, agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256,
          status, created_at, updated_at)
-       VALUES ('ag-missing', 'g1', 'sess-none', 'free', 'x.md', 'replace', 'x', 'h', 'queued', 't', 't')`,
+       VALUES ((SELECT COALESCE(MAX(seq), 0) + 1 FROM memory_write_ops), 'ag-missing', 'g1', 'sess-none', 'free', 'x.md', 'replace', 'x', 'h', 'queued', 't', 't')`,
     );
 
     await completePendingOps(deps);
@@ -597,6 +597,47 @@ describe('memory-gate ops completion', () => {
     expect(await getMemoryOp(GROUP, 'x1')).toMatchObject({ status: 'applied', attempts: MAX_ATTEMPTS });
     expect(read('notes.md')).toBe('landed on the last try');
     expect(agentNotices().filter((text) => text === 'memory written: notes.md')).toHaveLength(1);
+  });
+
+  it('completion order is the durable insertion sequence, never the wall clock', async () => {
+    // An older PREPARED op whose created_at is LATER than a newer queued op on the
+    // same file (a restart after a backward clock correction). The prepared op
+    // was inserted first and must run first; otherwise the newer op would change
+    // the file and force the approved older op into a conflict.
+    await insertRow({
+      request_id: 'older-prepared',
+      path: 'notes.md',
+      mode: 'append',
+      content: 'first',
+      before_sha256: sha('hello\n'),
+      after_sha256: sha('hello\nfirst'),
+      status: 'prepared',
+      attempts: 1,
+      created_at: '2026-09-16T12:00:00.000Z',
+    });
+    await insertRow({
+      request_id: 'newer-queued',
+      path: 'notes.md',
+      mode: 'append',
+      content: 'second',
+      before_sha256: null,
+      after_sha256: null,
+      status: 'queued',
+      created_at: '2026-09-15T00:00:00.000Z',
+    });
+    const rows = await listOps();
+    expect(rows.map((row) => row.request_id)).toEqual(['older-prepared', 'newer-queued']);
+    expect(rows[0]!.seq).toBeLessThan(rows[1]!.seq);
+
+    await completePendingOps(deps);
+
+    expect(await getMemoryOp(GROUP, 'older-prepared')).toMatchObject({ status: 'applied', attempts: 2 });
+    expect(await getMemoryOp(GROUP, 'newer-queued')).toMatchObject({ status: 'applied', attempts: 1 });
+    expect(read('notes.md')).toBe('hello\nfirst\nsecond');
+    // Enqueue through the real path keeps assigning increasing sequence numbers.
+    await enqueueMemoryOp(free('after-restart', 'notes.md', 'append', 'third'));
+    const last = (await getMemoryOp(GROUP, 'after-restart'))!;
+    expect(last.seq).toBeGreaterThan(rows[1]!.seq);
   });
 
   it('appends after a missing trailing newline, replaces, and deletes, one file per op', async () => {

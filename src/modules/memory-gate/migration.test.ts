@@ -37,9 +37,9 @@ describe('memory-gate migration', () => {
     // Status and kind are constrained at the database level.
     const insert = (status: string, kind = 'free', mode = 'append') =>
       db.run(
-        `INSERT INTO memory_write_ops (agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256,
+        `INSERT INTO memory_write_ops (seq, agent_group_id, request_id, session_id, kind, path, mode, content, content_sha256,
            status, created_at, updated_at)
-         VALUES ('g', ?, 's', ?, 'x.md', ?, 'c', 'h', ?, 't', 't')`,
+         VALUES ((SELECT COALESCE(MAX(seq), 0) + 1 FROM memory_write_ops), 'g', ?, 's', ?, 'x.md', ?, 'c', 'h', ?, 't', 't')`,
         `${status}-${kind}-${mode}`,
         kind,
         mode,
