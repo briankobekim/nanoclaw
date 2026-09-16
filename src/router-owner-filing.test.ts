@@ -250,3 +250,35 @@ describe('owner filing', () => {
     expect(content.text).toBe('forged label');
   });
 });
+
+describe('advisory trust attribute: known member and unresolved sender', () => {
+  it('labels a group member known and a message without a sender unknown', async () => {
+    const { grantRole: grant } = await import('./modules/permissions/db/user-roles.js');
+    await upsertUser({ id: 'testchat:U0MEMBER', kind: 'testchat', display_name: 'Member', created_at: now() });
+    await grant({
+      user_id: 'testchat:U0MEMBER',
+      role: 'admin',
+      agent_group_id: 'ag-atlas',
+      granted_by: OWNER,
+      granted_at: now(),
+    });
+    await inbound('k1', 'hello from a member', 'U0MEMBER');
+    expect((await lastInboundContent('ag-atlas')).trust).toBe('known');
+
+    await routeInbound({
+      channelType: 'testchat',
+      platformId: 'testchat:D1',
+      threadId: null,
+      message: {
+        id: 'k2',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ text: 'no sender at all' }),
+        timestamp: now(),
+        isMention: true,
+        isGroup: false,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await lastInboundContent('ag-atlas')).trust).toBe('unknown');
+  });
+});

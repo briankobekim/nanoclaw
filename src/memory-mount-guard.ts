@@ -124,13 +124,24 @@ export function assertNoWritableMemoryAlias(
   const roots = protectedRoots.map((root) => path.resolve(root));
   let lastWorkspace = -1;
   let lastAgent = -1;
+  let hasWorkspace = false;
+  let hasAgent = false;
   const overlayIndices: number[] = [];
 
   mounts.forEach((mount, index) => {
     const destination = normalizeContainerPath(mount.containerPath);
     if (destination === MEMORY_CONTAINER_PATH) overlayIndices.push(index);
-    if (destination === '/workspace') lastWorkspace = index;
-    if (destination === '/workspace/agent') lastAgent = index;
+    // Only a WRITABLE ancestor can expose memory by shadowing the overlay; a
+    // read-only replacement appended later cannot write, so it does not
+    // constrain the ordering (the composed-spec tests shadow /workspace read-only).
+    if (destination === '/workspace') {
+      hasWorkspace = true;
+      if (mount.readonly === false) lastWorkspace = index;
+    }
+    if (destination === '/workspace/agent') {
+      hasAgent = true;
+      if (mount.readonly === false) lastAgent = index;
+    }
 
     if (mount.readonly !== false) return;
     if (SHADOWED_ANCESTORS.includes(destination)) return;
@@ -161,9 +172,9 @@ export function assertNoWritableMemoryAlias(
   if (overlay.readonly !== true) {
     throw new MemoryMountError(`memory overlay at ${MEMORY_CONTAINER_PATH} must be read-only`);
   }
-  if (lastWorkspace === -1 || lastAgent === -1) {
+  if (!hasWorkspace || !hasAgent) {
     throw new MemoryMountError(
-      `memory overlay requires both ancestor mounts /workspace and /workspace/agent (found workspace=${lastWorkspace >= 0}, agent=${lastAgent >= 0})`,
+      `memory overlay requires both ancestor mounts /workspace and /workspace/agent (found workspace=${hasWorkspace}, agent=${hasAgent})`,
     );
   }
   if (overlayIndex < lastWorkspace || overlayIndex < lastAgent) {

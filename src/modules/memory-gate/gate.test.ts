@@ -350,8 +350,11 @@ describe('memory_write door', () => {
     await dispatch()(request({ request_id: 'mw-sym', path: 'operations/link.md' }), session);
     fs.symlinkSync(path.join(TEST_ROOT, 'outside.md'), path.join(memoryDir, 'operations/link.md'));
     await approve('appr-2');
-    await vi.waitFor(async () => expect((await getMemoryOp(GROUP, 'mw-sym'))?.status).toBe('conflict'));
+    await new Promise((r) => setTimeout(r, 50));
+    // A symlink anywhere in the tree fails the whole group closed: the op waits, nothing is written anywhere.
+    expect((await getMemoryOp(GROUP, 'mw-sym'))?.status).toBe('queued');
     expect(fs.existsSync(path.join(TEST_ROOT, 'outside.md'))).toBe(false);
+    expect(await getPendingApproval('appr-2')).toBeUndefined();
   });
 
   it('quiesce is an atomic barrier', async () => {
@@ -456,5 +459,59 @@ describe('memory_write door', () => {
     expect(f.notices).toHaveLength(bad.length);
     expect(f.notices.every((n) => n.startsWith('memory request denied'))).toBe(true);
     expect(fs.readdirSync(memoryDir, { recursive: true }).sort()).toEqual(before);
+  });
+});
+
+describe('memory_write door: hold confirmation and correction cases', () => {
+  it('hold confirmation fails safe', async () => {
+    // requestApproval that creates no row (no approver or no DM path): no "held" notice, an error is logged.
+    const { log } = await import('../../log.js');
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const noRow = fakes({ requestApproval: async () => undefined });
+    await dispatch()(request({ request_id: 'mw-norow' }), session);
+    expect(noRow.notices.some((n) => n.includes('could not be held'))).toBe(true);
+    expect(noRow.notices.some((n) => n.includes("held for Kobe's approval"))).toBe(false);
+    expect(errorSpy).toHaveBeenCalled();
+
+    // No delivery adapter: early notice, requestApproval never called.
+    const noAdapter = fakes({ getDeliveryAdapter: () => null });
+    await dispatch()(request({ request_id: 'mw-noadapter' }), session);
+    expect(noAdapter.approvals).toHaveLength(0);
+    expect(noAdapter.notices.at(-1)).toContain('no delivery channel');
+  });
+
+  it('a failed retention transition never deletes the approval', async () => {
+    const { completePendingOps } = await import('./ops.js');
+    void completePendingOps;
+    await setQuiesced(true);
+    fakes();
+    await createPendingApproval({
+      approval_id: 'appr-keep',
+      session_id: session.id,
+      request_id: 'appr-keep',
+      action: 'memory_write',
+      payload: JSON.stringify({
+        ...request({ request_id: 'mw-keep' }),
+        session_id: session.id,
+        sha256: requestSha(request()),
+      }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    const sessions = await import('../../db/sessions.js');
+    const original = sessions.transitionPendingApprovalStatus;
+    const spy = vi.spyOn(sessions, 'transitionPendingApprovalStatus').mockImplementation(async (id, from, to) => {
+      if (from === 'approved' && to === 'pending') throw new Error('db hiccup');
+      return original(id, from, to);
+    });
+    await approve('appr-keep');
+    spy.mockRestore();
+    const row = await getPendingApproval('appr-keep');
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('approved');
+    expect(await getMemoryOp(GROUP, 'mw-keep')).toBeUndefined();
+    await setQuiesced(false);
   });
 });

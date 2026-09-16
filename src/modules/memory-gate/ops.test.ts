@@ -195,7 +195,9 @@ describe('memory-gate ops completion', () => {
         formatOwnerBlock({ date: date(rows[1]!), messageId: 'm2', text: 'remember: second\nline two' }),
     );
     expect(tmpFiles()).toEqual([]);
-    expect(hashesOf(memoryRoot, OWNER_STATEMENTS_PATH)).toEqual(others);
+    // Completion scaffolds missing templates before writing; every file that existed before is untouched.
+    const after = hashesOf(memoryRoot, OWNER_STATEMENTS_PATH);
+    expect(new Map([...after].filter(([name]) => others.has(name)))).toEqual(others);
 
     const done = await listOps();
     expect(done.map((row) => row.status)).toEqual(['applied', 'applied']);
@@ -370,13 +372,32 @@ describe('memory-gate ops completion', () => {
     expect(await getMemoryOp(GROUP, 'r2')).toMatchObject({ status: 'abandoned', attempts: MAX_ATTEMPTS });
   });
 
-  it('resolves escapes, symlinks, missing parents, missing delete targets, and a missing group as conflict', async () => {
+  it('a symlink anywhere in the tree keeps every op of the group queued and writes nothing', async () => {
     fs.symlinkSync(path.join(GROUPS_ROOT, 'outside.md'), path.join(memoryRoot, 'link.md'));
     fs.writeFileSync(path.join(GROUPS_ROOT, 'outside.md'), 'outside');
     fs.symlinkSync(path.join(GROUPS_ROOT), path.join(memoryRoot, 'dirlink'));
-    await enqueueMemoryOp(free('p1', '../escape.md', 'replace', 'x'));
     await enqueueMemoryOp(free('p2', 'link.md', 'replace', 'x'));
     await enqueueMemoryOp(free('p3', 'dirlink/inner.md', 'replace', 'x'));
+    await enqueueMemoryOp(free('p8', 'plain.md', 'replace', 'x'));
+
+    await completePendingOps(deps);
+
+    const byId = new Map((await listOps()).map((row) => [row.request_id, row]));
+    for (const id of ['p2', 'p3', 'p8']) expect(byId.get(id)!.status, id).toBe('queued');
+    expect(fs.readFileSync(path.join(GROUPS_ROOT, 'outside.md'), 'utf8')).toBe('outside');
+    expect(fs.existsSync(path.join(GROUPS_ROOT, 'inner.md'))).toBe(false);
+    expect(fs.existsSync(path.join(memoryRoot, 'plain.md'))).toBe(false);
+    expect(agentNotices()).toHaveLength(0);
+
+    // Once the links are gone the same ops complete: p2/p3 then resolve as conflicts (parent missing / target absent for replace is fine → p2 becomes a plain file).
+    fs.unlinkSync(path.join(memoryRoot, 'link.md'));
+    fs.unlinkSync(path.join(memoryRoot, 'dirlink'));
+    await completePendingOps(deps);
+    expect((await listOps()).find((row) => row.request_id === 'p8')?.status).toBe('applied');
+  });
+
+  it('resolves escapes, missing parents, missing delete targets, a directory target, and a missing group as conflict', async () => {
+    await enqueueMemoryOp(free('p1', '../escape.md', 'replace', 'x'));
     await enqueueMemoryOp(free('p4', 'missing-dir/inner.md', 'replace', 'x'));
     await enqueueMemoryOp(free('p5', 'nope.md', 'delete', null));
     await enqueueMemoryOp(free('p6', 'system', 'replace', 'x'));
@@ -390,19 +411,17 @@ describe('memory-gate ops completion', () => {
     await completePendingOps(deps);
 
     const byId = new Map((await listOps()).map((row) => [row.request_id, row]));
-    for (const id of ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'g1']) {
+    for (const id of ['p1', 'p4', 'p5', 'p6', 'g1']) {
       expect(byId.get(id)!.status, id).toBe('conflict');
       expect(byId.get(id)!.last_error, id).toBeTruthy();
     }
     expect(byId.get('p7')).toMatchObject({ status: 'applied' });
     expect(read('system/definition.md')).toBe('redefined');
-    expect(fs.readFileSync(path.join(GROUPS_ROOT, 'outside.md'), 'utf8')).toBe('outside');
     expect(fs.existsSync(path.join(GROUPS_ROOT, 'escape.md'))).toBe(false);
-    expect(fs.existsSync(path.join(GROUPS_ROOT, 'inner.md'))).toBe(false);
     expect(fs.existsSync(path.join(memoryRoot, 'missing-dir'))).toBe(false);
     expect(tmpFiles()).toEqual([]);
-    // Six conflicts for the live session, none for the missing group (no session to notify).
-    expect(agentNotices().filter((text) => /conflict/i.test(text))).toHaveLength(6);
+    // Four conflicts for the live session, none for the missing group (no session to notify).
+    expect(agentNotices().filter((text) => /conflict/i.test(text))).toHaveLength(4);
     expect(deps.notifyOwner).not.toHaveBeenCalled();
   });
 

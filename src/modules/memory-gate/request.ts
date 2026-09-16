@@ -6,7 +6,7 @@
  * primitive, the delivery adapter, and the ledger without touching Slack.
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getPendingApprovalsByAction, transitionPendingApprovalStatus } from '../../db/sessions.js';
+import { getPendingApprovalsByAction } from '../../db/sessions.js';
 import { getDeliveryAdapter, reenterGuardedDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
@@ -194,7 +194,7 @@ export async function retainingReplay(ctx: ApprovalHandlerContext): Promise<void
       return;
     } catch (err) {
       if (err instanceof QuiescedError) {
-        await transitionPendingApprovalStatus(ctx.approval.approval_id, 'approved', 'pending');
+        // The approvals response handler owns the approved → pending transition.
         log.info('memory-gate: approval retained while quiesced', { approvalId: ctx.approval.approval_id });
         return { outcome: 'retained' };
       }

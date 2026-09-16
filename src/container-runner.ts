@@ -724,12 +724,13 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   if (runAs) env.HOME = '/home/node';
 
   // Gateway mounts merge here, after buildMounts already ran its check, so the
-  // memory alias guard runs once more on the FINAL list the driver will see.
+  // memory alias guard runs once more, in full, on the FINAL list the driver
+  // will see: a contributed writable ancestor appended after the overlay would
+  // shadow it, and the ordering check is what refuses that.
   const mergedMounts = mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []);
   assertNoWritableMemoryAlias(
     mergedMounts.map((m) => ({ hostPath: m.hostPath, containerPath: m.containerPath, readonly: m.mode === 'ro' })),
     listProtectedMemoryRoots(),
-    { requireOverlay: false },
   );
 
   const agent: ContainerSpec = {

@@ -122,9 +122,20 @@ async function handleRegisteredApproval(
     if (result && result.outcome === 'retained') {
       // The domain could not apply the grant right now (maintenance barrier)
       // and asked to keep it: back to pending, card still actionable, no
-      // resolution notice.
-      await transitionPendingApprovalStatus(approval.approval_id, 'approved', 'pending');
-      log.info('Approval retained by handler', { approvalId: approval.approval_id, action: approval.action });
+      // resolution notice. This transition is the only one, and its failure
+      // must never fall through to deletion: the row stays `approved` for an
+      // operator to reset, and the tap is not lost.
+      try {
+        await transitionPendingApprovalStatus(approval.approval_id, 'approved', 'pending');
+        log.info('Approval retained by handler', { approvalId: approval.approval_id, action: approval.action });
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed retention transition is logged and the row is left for the operator; deleting it would lose the owner's tap
+      } catch (err) {
+        log.error('Approval retention transition failed; row left as approved', {
+          approvalId: approval.approval_id,
+          action: approval.action,
+          err,
+        });
+      }
       return;
     }
     log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });

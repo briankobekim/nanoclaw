@@ -16,6 +16,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { MemoryPreflightError, prepareMemoryRoot } from '../../memory-scaffold.js';
 import { getDb } from '../../db/connection.js';
 import { isUniqueViolation } from '../../db/errors.js';
 import { getSession } from '../../db/sessions.js';
@@ -242,19 +243,29 @@ async function completeGroup(groupId: string, deps: CompletionDeps): Promise<voi
     for (const op of ops) await markConflict(op, 'agent group not found', deps, { notify: false });
     return;
   }
+  // The same preflight the spawn runs: lstat walk (no symlink anywhere, real
+  // directory beneath the real group dir, no hard links) and scaffolding of a
+  // missing tree. Owner filing can kick completion before the group's first
+  // spawn, so this must not depend on the spawn having run. A refusal leaves
+  // every op queued for the next tick (the spawn preflight tells the owner);
+  // it is never a conflict.
   let memoryRoot: string;
   try {
-    memoryRoot = fs.realpathSync(path.join(GROUPS_DIR, group.folder, 'memory'));
-    // eslint-disable-next-line no-catch-all/no-catch-all -- an unresolvable memory root is a conflict for every op of the group, whatever the cause
+    memoryRoot = await prepareMemoryRoot(path.join(GROUPS_DIR, group.folder), {
+      notifyOwner: async () => undefined,
+    });
   } catch (err) {
-    for (const op of ops) await markConflict(op, `memory root unavailable: ${errorMessage(err)}`, deps);
-    return;
+    if (err instanceof MemoryPreflightError) {
+      log.error('memory-gate: memory root refused by preflight; ops stay queued', { agentGroupId: groupId, err });
+      return;
+    }
+    throw err;
   }
 
   for (const op of ops) {
     try {
       await completeOne(op, memoryRoot, deps);
-      // eslint-disable-next-line no-catch-all/no-catch-all -- a database or unexpected error leaves the row as it is; the next tick retries, and the other ops of the group still run
+      // eslint-disable-next-line no-catch-all/no-catch-all -- a database or unexpected error leaves the row as it is; the next tick retries
     } catch (err) {
       log.error('memory-gate: op completion failed', {
         agentGroupId: op.agent_group_id,
@@ -262,6 +273,17 @@ async function completeGroup(groupId: string, deps: CompletionDeps): Promise<voi
         path: op.path,
         err,
       });
+    }
+    // Creation order is the contract: if this op is still pending after its
+    // attempt, a later op must not overtake it (two appends to one file would
+    // otherwise land out of order and turn the earlier one into a conflict).
+    const after = await getMemoryOp(op.agent_group_id, op.request_id);
+    if (after && (after.status === 'queued' || after.status === 'prepared')) {
+      log.warn('memory-gate: earlier op still pending; later ops of the group wait for the next tick', {
+        agentGroupId: op.agent_group_id,
+        requestId: op.request_id,
+      });
+      return;
     }
   }
 }

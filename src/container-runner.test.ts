@@ -92,6 +92,20 @@ const mounts: VolumeMount[] = [
     scope: 'agent-1',
   },
   {
+    hostPath: '/install/groups/agent-one',
+    containerPath: '/workspace/agent',
+    readonly: false,
+    mountClass: 'group-state',
+    scope: 'agent-1',
+  },
+  {
+    hostPath: '/install/groups/agent-one/memory',
+    containerPath: '/workspace/agent/memory',
+    readonly: true,
+    mountClass: 'group-state',
+    scope: 'agent-1',
+  },
+  {
     hostPath: '/install/container/agent-runner/src',
     containerPath: '/app/src',
     readonly: true,
@@ -368,6 +382,20 @@ describe('toMountSpecs', () => {
         hostPath: '/install/data/v2-sessions/agent-1/session-1',
         containerPath: '/workspace',
         mode: 'rw',
+        groupScope: 'agent-1',
+      },
+      {
+        class: 'group-state',
+        hostPath: '/install/groups/agent-one',
+        containerPath: '/workspace/agent',
+        mode: 'rw',
+        groupScope: 'agent-1',
+      },
+      {
+        class: 'group-state',
+        hostPath: '/install/groups/agent-one/memory',
+        containerPath: '/workspace/agent/memory',
+        mode: 'ro',
         groupScope: 'agent-1',
       },
       {
