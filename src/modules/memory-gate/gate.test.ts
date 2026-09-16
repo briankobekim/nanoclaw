@@ -556,6 +556,74 @@ describe('memory_write door: hold confirmation and correction cases', () => {
     expect(f.ownerNotices.some((n) => n.includes('lost'))).toBe(true);
   });
 
+  it('re-hold confirmation is bound to a row created by this re-hold with this exact payload', async () => {
+    await setQuiesced(true);
+    // An OLDER pending hold that reused the same agent-chosen request id with other content.
+    const older = request({ request_id: 'mw-dup', content: 'older text' });
+    await createPendingApproval({
+      approval_id: 'appr-dup-older',
+      session_id: session.id,
+      request_id: 'appr-dup-older',
+      action: 'memory_write',
+      payload: JSON.stringify({ ...older, session_id: session.id, sha256: requestSha(older) }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    // The approved request B, whose replacement card cannot be created (delivery failed → row removed).
+    const b = request({ request_id: 'mw-dup', content: 'newer text' });
+    await createPendingApproval({
+      approval_id: 'appr-dup-b',
+      session_id: session.id,
+      request_id: 'appr-dup-b',
+      action: 'memory_write',
+      payload: JSON.stringify({ ...b, session_id: session.id, sha256: requestSha(b) }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    fakes({ requestApproval: async () => undefined });
+    await approve('appr-dup-b');
+    // The older hold must not have served as B's confirmation: B is kept for the operator.
+    expect((await getPendingApproval('appr-dup-b'))?.status).toBe('approved');
+    expect((await getPendingApproval('appr-dup-older'))?.status).toBe('pending');
+    expect(await getMemoryOp(GROUP, 'mw-dup')).toBeUndefined();
+
+    // A re-hold whose fresh card carries a DIFFERENT payload hash is not a confirmation either.
+    const c = request({ request_id: 'mw-dup-c', content: 'c text' });
+    await createPendingApproval({
+      approval_id: 'appr-dup-c',
+      session_id: session.id,
+      request_id: 'appr-dup-c',
+      action: 'memory_write',
+      payload: JSON.stringify({ ...c, session_id: session.id, sha256: requestSha(c) }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    fakes({
+      requestApproval: async (opts) => {
+        await createPendingApproval({
+          approval_id: 'appr-dup-c-wrong',
+          session_id: opts.session.id,
+          request_id: 'appr-dup-c-wrong',
+          action: opts.action,
+          payload: JSON.stringify({ ...opts.payload, sha256: 'not-the-same-hash' }),
+          created_at: now(),
+          title: 't',
+          options_json: JSON.stringify([]),
+          approver_user_id: OWNER,
+        });
+      },
+    });
+    await approve('appr-dup-c');
+    expect((await getPendingApproval('appr-dup-c'))?.status).toBe('approved');
+    await setQuiesced(false);
+  });
+
   it('a quiesced replay whose re-hold cannot be issued keeps the approval for the operator', async () => {
     await setQuiesced(true);
     fakes({ getDeliveryAdapter: () => null });

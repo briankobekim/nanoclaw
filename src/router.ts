@@ -615,7 +615,9 @@ async function deliverToAgent(
           instance: mg.instance ?? null,
           messagingGroupId: mg.id,
           platformId: mg.platform_id,
-          threadId: deliveryAddr.threadId ?? null,
+          // The raw source thread: the delivery address may collapse threads
+          // by policy, and two source threads must never share a key.
+          threadId: event.threadId ?? null,
           messageId: event.message.id,
           agentGroupId: agent.agent_group_id,
         },

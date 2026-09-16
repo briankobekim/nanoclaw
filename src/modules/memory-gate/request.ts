@@ -114,9 +114,12 @@ export async function validateShape(content: Record<string, unknown>, session: S
 
 /**
  * Card the owner with the complete content, then confirm the hold exists.
- * Returns true when a pending row for this request is on record. `rehold`
- * re-issues a card for a grant that could not be applied while quiesced: the
- * barrier blocks op inserts, not cards, so the quiesce check is skipped.
+ * Returns true only when a pending row that did NOT exist before this call,
+ * for this session, request id and exact payload hash, is on record: an older
+ * hold with the same agent-chosen request id can never confirm a new one.
+ * `rehold` re-issues a card for a grant that could not be applied while
+ * quiesced: the barrier blocks op inserts, not cards, so the quiesce check is
+ * skipped.
  */
 export async function requestMemoryHold(
   content: Record<string, unknown>,
@@ -159,6 +162,9 @@ export async function requestMemoryHold(
     return false;
   }
 
+  const preexisting = new Set(
+    (await deps.getPendingApprovalsByAction(MEMORY_WRITE_ACTION)).map((row) => row.approval_id),
+  );
   await deps.requestApproval({
     session,
     agentName,
@@ -173,15 +179,18 @@ export async function requestMemoryHold(
   });
 
   const rows = await deps.getPendingApprovalsByAction(MEMORY_WRITE_ACTION);
-  // The hold exists only if a row OTHER than the one being replayed is pending
-  // for this request: the clicked row is still `approved` while a re-hold runs
-  // and must never count as its own confirmation.
+  // The hold exists only if a row created BY THIS CALL is pending for this
+  // session with this request id and this exact payload hash. A pre-existing
+  // row (the clicked row of a re-hold, still `approved`, or an older hold that
+  // reused the same agent-chosen request id) never counts as confirmation.
   const held = rows.some((row) => {
     if (row.session_id !== session.id) return false;
     if (row.status !== 'pending') return false;
+    if (preexisting.has(row.approval_id)) return false;
     if (options.excludeApprovalId && row.approval_id === options.excludeApprovalId) return false;
     try {
-      return (JSON.parse(row.payload) as { request_id?: unknown }).request_id === requestId;
+      const payload = JSON.parse(row.payload) as { request_id?: unknown; sha256?: unknown };
+      return payload.request_id === requestId && payload.sha256 === sha256;
       // eslint-disable-next-line no-catch-all/no-catch-all -- a malformed row is simply not our hold
     } catch {
       return false;

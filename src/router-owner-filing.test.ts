@@ -62,13 +62,14 @@ function key(
   messageId: string,
   agentGroupId: string,
   mg: { id: string; platformId: string } = { id: 'mg-1', platformId: 'testchat:D1' },
+  threadId: string | null = null,
 ): string {
   return ownerFilingRequestId({
     channelType: 'testchat',
     instance: 'testchat',
     messagingGroupId: mg.id,
     platformId: mg.platformId,
-    threadId: null,
+    threadId,
     messageId,
     agentGroupId,
   });
@@ -107,7 +108,7 @@ function memoryDir(folder: string): string {
   return path.join(TEST_ROOT, 'groups', folder, 'memory');
 }
 
-async function seedAgent(id: string, folder: string, mgaId: string): Promise<void> {
+async function seedAgent(id: string, folder: string, mgaId: string, threads = 1): Promise<void> {
   await createAgentGroup({ id, name: id, folder, agent_provider: null, created_at: now() });
   fs.mkdirSync(memoryDir(folder), { recursive: true });
   fs.writeFileSync(path.join(memoryDir(folder), 'owner-statements.md'), '---\ntype: owner-statements\n---\n');
@@ -121,7 +122,7 @@ async function seedAgent(id: string, folder: string, mgaId: string): Promise<voi
     ignored_message_policy: 'drop',
     session_mode: 'shared',
     priority: 0,
-    threads: 1,
+    threads,
     created_at: now(),
   });
 }
@@ -132,11 +133,12 @@ async function inbound(
   senderId = OWNER_RAW,
   extra: Record<string, unknown> = {},
   platformId = 'testchat:D1',
+  threadId: string | null = null,
 ): Promise<void> {
   await routeInbound({
     channelType: 'testchat',
     platformId,
-    threadId: null,
+    threadId,
     message: {
       id,
       kind: 'chat-sdk',
@@ -328,6 +330,29 @@ describe('owner filing', () => {
     expect((rows2 ?? []).some((row) => JSON.parse(row.content).text === 'remember: said in the second chat')).toBe(
       true,
     );
+  });
+
+  it('equal platform message ids from two source threads of a thread-collapsing conversation are two provenance events', async () => {
+    // A DM collapses every sub-thread into one session, so the delivery
+    // address alone cannot tell the two messages apart; the filing key uses
+    // the raw source thread instead.
+    await inbound('same-thread-id', 'remember: said twice', OWNER_RAW, {}, 'testchat:D1', 'T1');
+    // The collapsed session's mailbox refuses a second row with the same
+    // platform id (pre-existing per-session uniqueness); the statement is
+    // still filed under its own key BEFORE that write, never deduplicated
+    // into the first thread's event.
+    await expect(inbound('same-thread-id', 'remember: said twice', OWNER_RAW, {}, 'testchat:D1', 'T2')).rejects.toThrow(
+      /UNIQUE constraint failed: messages_in.id/,
+    );
+
+    const one = key('same-thread-id', 'ag-atlas', undefined, 'T1');
+    const two = key('same-thread-id', 'ag-atlas', undefined, 'T2');
+    expect(one).not.toBe(two);
+    await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', one))?.status).toBe('applied'));
+    await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', two))?.status).toBe('applied'));
+    const filed = fs.readFileSync(path.join(memoryDir('atlas'), 'owner-statements.md'), 'utf8');
+    expect(filed.split('remember: said twice').length - 1).toBe(2);
+    expect(filed).toContain('(msg same-thread-id:ag-atlas)');
   });
 
   it('the router stamps the advisory trust attribute', async () => {
