@@ -34,7 +34,12 @@ function errnoCode(err: unknown): string | undefined {
   return typeof err === 'object' && err !== null ? (err as { code?: string }).code : undefined;
 }
 
-/** Real paths of every existing `<groupsDir>/<group>/memory` directory. */
+/**
+ * Canonical `<groupsDir>/<group>/memory` for EVERY group directory, whether or
+ * not the memory directory exists yet: a never-spawned group has no memory
+ * tree, and a writable mount of its directory could pre-populate one that the
+ * group's first preflight would then accept as ordinary files.
+ */
 export function listProtectedMemoryRoots(groupsDir: string = GROUPS_DIR): string[] {
   let entries: string[];
   try {
@@ -46,17 +51,17 @@ export function listProtectedMemoryRoots(groupsDir: string = GROUPS_DIR): string
   const roots: string[] = [];
   for (const name of entries) {
     if (name.startsWith('.')) continue;
-    const memoryDir = path.join(groupsDir, name, 'memory');
+    const groupDir = path.join(groupsDir, name);
     let st: fs.Stats;
     try {
-      st = fs.statSync(memoryDir);
+      st = fs.statSync(groupDir);
     } catch (err) {
       const code = errnoCode(err);
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       throw err;
     }
     if (!st.isDirectory()) continue;
-    roots.push(fs.realpathSync(memoryDir));
+    roots.push(canonicalHostPath(path.join(groupDir, 'memory')));
   }
   return roots;
 }

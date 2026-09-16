@@ -21,7 +21,7 @@ vi.mock('./config.js', async () => {
 import { closeDb, initTestDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { buildMounts, composeSessionSpec } from './container-runner.js';
-import { MEMORY_CONTAINER_PATH } from './memory-mount-guard.js';
+import { assertNoWritableMemoryAlias, listProtectedMemoryRoots, MEMORY_CONTAINER_PATH } from './memory-mount-guard.js';
 import type { ContainerConfig } from './container-config.js';
 import type { AgentGroup, Session } from './types.js';
 
@@ -142,6 +142,24 @@ describe('the standard mount set spawns (real buildMounts)', () => {
         } as never,
       }),
     ).toThrow(/backed by/);
+  });
+
+  it('a group that has never spawned is protected before its memory directory exists', async () => {
+    fs.mkdirSync(path.join(TEST_ROOT, 'groups', 'never-spawned'), { recursive: true });
+    const roots = listProtectedMemoryRoots();
+    expect(roots).toContain(path.join(fs.realpathSync(TEST_ROOT), 'groups', 'never-spawned', 'memory'));
+    const mounts = await buildMounts(agentGroup, session, containerConfig, 'codex', {});
+    const withExtra = [
+      ...mounts,
+      {
+        hostPath: path.join(TEST_ROOT, 'groups', 'never-spawned'),
+        containerPath: '/workspace/extra/other',
+        readonly: false,
+      },
+    ];
+    expect(() =>
+      assertNoWritableMemoryAlias(withExtra, roots, { expectedOverlaySource: path.join(groupDir, 'memory') }),
+    ).toThrow(/aliases protected memory root/);
   });
 
   it('a symlinked memory root refuses the spawn', async () => {

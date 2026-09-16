@@ -54,19 +54,22 @@ function now(): string {
 
 interface Fakes {
   approvals: RequestApprovalOptions[];
+  createdIds: string[];
   notices: string[];
   ownerNotices: string[];
 }
 
 function fakes(overrides: Partial<MemoryGateDeps> = {}): Fakes {
-  const state: Fakes = { approvals: [], notices: [], ownerNotices: [] };
+  const state: Fakes = { approvals: [], createdIds: [], notices: [], ownerNotices: [] };
   setMemoryGateDeps({
     requestApproval: async (opts) => {
       state.approvals.push(opts);
+      const id = `appr-${state.approvals.length}-${Math.random().toString(36).slice(2, 8)}`;
+      state.createdIds.push(id);
       await createPendingApproval({
-        approval_id: `appr-${state.approvals.length}`,
+        approval_id: id,
         session_id: opts.session.id,
-        request_id: `appr-${state.approvals.length}`,
+        request_id: id,
         action: opts.action,
         payload: JSON.stringify(opts.payload),
         created_at: now(),
@@ -161,13 +164,13 @@ describe('memory_write door', () => {
   it('an approved replay executes exactly once and a mismatched grant is refused', async () => {
     const f = fakes();
     await dispatch()(request(), session);
-    expect(await approve('appr-1')).toBe(true);
+    expect(await approve(f.createdIds[0]!)).toBe(true);
     await vi.waitFor(async () => {
       expect((await getMemoryOp(GROUP, 'mw-1-deadbeef'))?.status).toBe('applied');
     });
     const target = path.join(memoryDir, 'operations/decisions.md');
     expect(fs.readFileSync(target, 'utf8')).toContain('Ship on Fridays.');
-    expect(await getPendingApproval('appr-1')).toBeUndefined();
+    expect(await getPendingApproval(f.createdIds[0]!)).toBeUndefined();
 
     // Same grant replayed again (row re-created by hand): the op already exists → no second append.
     await createPendingApproval({
@@ -203,17 +206,17 @@ describe('memory_write door', () => {
   });
 
   it('rejecting drops', async () => {
-    fakes();
+    const f = fakes();
     await dispatch()(request(), session);
     await handleApprovalsResponse({
-      questionId: 'appr-1',
+      questionId: f.createdIds[0]!,
       value: 'reject',
       userId: 'U0OWNER',
       channelType: 'slack',
       platformId: 'dm-owner',
       threadId: null,
     });
-    expect(await getPendingApproval('appr-1')).toBeUndefined();
+    expect(await getPendingApproval(f.createdIds[0]!)).toBeUndefined();
     expect(await getMemoryOp(GROUP, 'mw-1-deadbeef')).toBeUndefined();
     expect(fs.existsSync(path.join(memoryDir, 'operations/decisions.md'))).toBe(false);
   });
@@ -335,7 +338,7 @@ describe('memory_write door', () => {
   });
 
   it('filesystem state is resolved at completion as conflict, never as a lost tap', async () => {
-    fakes();
+    const f = fakes();
     const target = path.join(memoryDir, 'operations/gone.md');
     fs.writeFileSync(target, 'to be deleted\n');
     await dispatch()(
@@ -343,18 +346,18 @@ describe('memory_write door', () => {
       session,
     );
     fs.unlinkSync(target);
-    await approve('appr-1');
+    await approve(f.createdIds[0]!);
     await vi.waitFor(async () => expect((await getMemoryOp(GROUP, 'mw-del'))?.status).toBe('conflict'));
-    expect(await getPendingApproval('appr-1')).toBeUndefined();
+    expect(await getPendingApproval(f.createdIds[0]!)).toBeUndefined();
 
     await dispatch()(request({ request_id: 'mw-sym', path: 'operations/link.md' }), session);
     fs.symlinkSync(path.join(TEST_ROOT, 'outside.md'), path.join(memoryDir, 'operations/link.md'));
-    await approve('appr-2');
+    await approve(f.createdIds[1]!);
     await new Promise((r) => setTimeout(r, 50));
     // A symlink anywhere in the tree fails the whole group closed: the op waits, nothing is written anywhere.
     expect((await getMemoryOp(GROUP, 'mw-sym'))?.status).toBe('queued');
     expect(fs.existsSync(path.join(TEST_ROOT, 'outside.md'))).toBe(false);
-    expect(await getPendingApproval('appr-2')).toBeUndefined();
+    expect(await getPendingApproval(f.createdIds[1]!)).toBeUndefined();
   });
 
   it('quiesce is an atomic barrier', async () => {
@@ -396,7 +399,7 @@ describe('memory_write door', () => {
     expect(await getPendingApproval('appr-q')).toBeUndefined();
     const reissued = f.approvals.at(-1)!;
     expect(reissued.payload.request_id).toBe('mw-q2');
-    expect((await getPendingApproval(`appr-${f.approvals.length}`))?.status).toBe('pending');
+    expect((await getPendingApproval(f.createdIds.at(-1)!))?.status).toBe('pending');
     expect(f.notices.at(-1)).toContain('re-held');
     expect(await getMemoryOp(GROUP, 'mw-q2')).toBeUndefined();
     await completePendingOps({ notifyAgent: async () => {}, notifyOwner: async () => {}, now: () => new Date() });
@@ -516,6 +519,43 @@ describe('memory_write door: hold confirmation and correction cases', () => {
     expect(row!.status).toBe('approved');
   });
 
+  it('a same-key ledger row with another payload or a terminal status is not a commit', async () => {
+    const { enqueueMemoryOp } = await import('./ops.js');
+    // A different payload already holds the request id (agent reused it): the approved write cannot be recorded.
+    await enqueueMemoryOp({
+      agentGroupId: GROUP,
+      requestId: 'mw-reuse',
+      sessionId: session.id,
+      kind: 'free',
+      path: 'operations/other.md',
+      mode: 'replace',
+      content: 'other',
+    });
+    const f = fakes({
+      enqueueMemoryOp: async () => {
+        throw new Error('sqlite busy');
+      },
+    });
+    await createPendingApproval({
+      approval_id: 'appr-reuse',
+      session_id: session.id,
+      request_id: 'appr-reuse',
+      action: 'memory_write',
+      payload: JSON.stringify({
+        ...request({ request_id: 'mw-reuse' }),
+        session_id: session.id,
+        sha256: requestSha(request()),
+      }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    await approve('appr-reuse');
+    expect(f.notices.some((n) => n.includes('lost'))).toBe(true);
+    expect(f.ownerNotices.some((n) => n.includes('lost'))).toBe(true);
+  });
+
   it('a quiesced replay whose re-hold cannot be issued keeps the approval for the operator', async () => {
     await setQuiesced(true);
     fakes({ getDeliveryAdapter: () => null });
@@ -537,6 +577,50 @@ describe('memory_write door: hold confirmation and correction cases', () => {
     await approve('appr-noadapter');
     expect((await getPendingApproval('appr-noadapter'))?.status).toBe('approved');
     expect(await getMemoryOp(GROUP, 'mw-noadapter')).toBeUndefined();
+
+    // requestApproval that creates no row (missing DM): the clicked row must not count as its own confirmation.
+    fakes({ requestApproval: async () => undefined });
+    await createPendingApproval({
+      approval_id: 'appr-nodm',
+      session_id: session.id,
+      request_id: 'appr-nodm',
+      action: 'memory_write',
+      payload: JSON.stringify({
+        ...request({ request_id: 'mw-nodm' }),
+        session_id: session.id,
+        sha256: requestSha(request()),
+      }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    await approve('appr-nodm');
+    expect((await getPendingApproval('appr-nodm'))?.status).toBe('approved');
+
+    // requestApproval that throws: kept as well.
+    fakes({
+      requestApproval: async () => {
+        throw new Error('slack down');
+      },
+    });
+    await createPendingApproval({
+      approval_id: 'appr-throw',
+      session_id: session.id,
+      request_id: 'appr-throw',
+      action: 'memory_write',
+      payload: JSON.stringify({
+        ...request({ request_id: 'mw-throw' }),
+        session_id: session.id,
+        sha256: requestSha(request()),
+      }),
+      created_at: now(),
+      title: 't',
+      options_json: JSON.stringify([]),
+      approver_user_id: OWNER,
+    });
+    await approve('appr-throw');
+    expect((await getPendingApproval('appr-throw'))?.status).toBe('approved');
     await setQuiesced(false);
   });
 });

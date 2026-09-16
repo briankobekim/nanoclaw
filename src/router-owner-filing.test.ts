@@ -15,6 +15,11 @@ vi.mock('./container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
+vi.mock('./session-manager.js', async () => {
+  const actual = await vi.importActual<typeof import('./session-manager.js')>('./session-manager.js');
+  return { ...actual, writeSessionMessage: vi.fn(actual.writeSessionMessage) };
+});
+
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
   return {
@@ -36,7 +41,7 @@ import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } 
 import type { ChannelAdapter, ChannelDefaults } from './channels/adapter.js';
 import { routeInbound } from './router.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { withExistingMailboxSession } from './session-manager.js';
+import { withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 import { upsertUser } from './modules/permissions/db/users.js';
 import { grantRole } from './modules/permissions/db/user-roles.js';
 import './modules/permissions/index.js';
@@ -192,10 +197,24 @@ describe('owner filing', () => {
   });
 
   it('owner filing is idempotent across a failed mailbox write', async () => {
+    // First attempt: the op is inserted, then the mailbox write fails.
+    vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('disk full'));
+    await expect(inbound('m10', 'remember: idempotent')).rejects.toThrow('disk full');
+    expect((await getMemoryOp('ag-atlas', 'owner:m10:ag-atlas'))?.kind).toBe('owner');
+    const before = await withExistingMailboxSession(
+      'ag-atlas',
+      (await findSessionForAgent('ag-atlas', 'mg-1', null))!.id,
+      (mb) => mb.getInboundHistory(10),
+    );
+    expect((before ?? []).some((row) => JSON.parse(row.content).text === 'remember: idempotent')).toBe(false);
+    // Retry of the same event: the op insert is idempotent ('exists') and the message is now delivered once.
     await inbound('m10', 'remember: idempotent');
-    // A replay of the same event reaches the op insert first (idempotent: 'exists'),
-    // then the mailbox refuses the duplicate row id — the filing never doubles.
-    await expect(inbound('m10', 'remember: idempotent')).rejects.toThrow(/UNIQUE/);
+    const afterRows = await withExistingMailboxSession(
+      'ag-atlas',
+      (await findSessionForAgent('ag-atlas', 'mg-1', null))!.id,
+      (mb) => mb.getInboundHistory(10),
+    );
+    expect((afterRows ?? []).filter((row) => JSON.parse(row.content).text === 'remember: idempotent')).toHaveLength(1);
     const ops = (await listOps()).filter((op) => op.request_id === 'owner:m10:ag-atlas');
     expect(ops).toHaveLength(1);
     await vi.waitFor(async () => expect((await getMemoryOp('ag-atlas', 'owner:m10:ag-atlas'))?.status).toBe('applied'));
@@ -213,6 +232,12 @@ describe('owner filing', () => {
       content: 'something else entirely',
     });
     await expect(inbound('m11', 'remember: conflicting reuse')).rejects.toThrow(/different content/);
+    const rows = await withExistingMailboxSession(
+      'ag-atlas',
+      (await findSessionForAgent('ag-atlas', 'mg-1', null))!.id,
+      (mb) => mb.getInboundHistory(20),
+    );
+    expect((rows ?? []).some((row) => JSON.parse(row.content).text === 'remember: conflicting reuse')).toBe(false);
   });
 
   it('owner filing records only the typed text and skips filing while quiesced', async () => {

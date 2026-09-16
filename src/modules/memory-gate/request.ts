@@ -5,6 +5,8 @@
  * Dependencies are injectable so the acceptance tests can fake the approval
  * primitive, the delivery adapter, and the ledger without touching Slack.
  */
+import { createHash } from 'node:crypto';
+
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getPendingApprovalsByAction } from '../../db/sessions.js';
 import { getDeliveryAdapter, reenterGuardedDeliveryAction } from '../../delivery.js';
@@ -114,7 +116,7 @@ export async function validateShape(content: Record<string, unknown>, session: S
 export async function requestMemoryHold(
   content: Record<string, unknown>,
   session: Session,
-  options: { rehold?: boolean } = {},
+  options: { rehold?: boolean; excludeApprovalId?: string } = {},
 ): Promise<boolean> {
   const path = content.path as string;
   const mode = content.mode as string;
@@ -166,8 +168,13 @@ export async function requestMemoryHold(
   });
 
   const rows = await deps.getPendingApprovalsByAction(MEMORY_WRITE_ACTION);
+  // The hold exists only if a row OTHER than the one being replayed is pending
+  // for this request: the clicked row is still `approved` while a re-hold runs
+  // and must never count as its own confirmation.
   const held = rows.some((row) => {
     if (row.session_id !== session.id) return false;
+    if (row.status !== 'pending') return false;
+    if (options.excludeApprovalId && row.approval_id === options.excludeApprovalId) return false;
     try {
       return (JSON.parse(row.payload) as { request_id?: unknown }).request_id === requestId;
       // eslint-disable-next-line no-catch-all/no-catch-all -- a malformed row is simply not our hold
@@ -211,8 +218,22 @@ export async function retainingReplay(ctx: ApprovalHandlerContext): Promise<void
       if (err instanceof QuiescedError) {
         // The old card is already terminalized by the channel bridge, so the
         // tap is carried by a FRESH card for the same request. If that card
-        // cannot be issued, keep the old row for the operator instead.
-        const reissued = await requestMemoryHold(ctx.payload, ctx.session, { rehold: true });
+        // cannot be issued, or anything on the way throws, keep the old row
+        // for the operator instead of letting the generic path delete it.
+        let reissued = false;
+        try {
+          reissued = await requestMemoryHold(ctx.payload, ctx.session, {
+            rehold: true,
+            excludeApprovalId: ctx.approval.approval_id,
+          });
+          // eslint-disable-next-line no-catch-all/no-catch-all -- any failure to re-issue must keep the grant, never drop it
+        } catch (reholdErr) {
+          log.error('memory-gate: re-hold threw; approval kept for the operator', {
+            approvalId: ctx.approval.approval_id,
+            err: reholdErr,
+          });
+          throw new RetainApprovalError('quiesced and the re-hold threw');
+        }
         if (!reissued) throw new RetainApprovalError('quiesced and the hold could not be re-issued');
         log.info('memory-gate: approval re-issued while quiesced', { approvalId: ctx.approval.approval_id });
         return { outcome: 'retained' };
@@ -225,7 +246,21 @@ export async function retainingReplay(ctx: ApprovalHandlerContext): Promise<void
   const requestId = typeof ctx.payload.request_id === 'string' ? ctx.payload.request_id : '';
   let committed: boolean;
   try {
-    committed = requestId !== '' && (await deps.getMemoryOp(ctx.session.agent_group_id, requestId)) !== undefined;
+    const row = requestId !== '' ? await deps.getMemoryOp(ctx.session.agent_group_id, requestId) : undefined;
+    // Only the IDENTICAL op in a live state proves the approved write was
+    // recorded: a same-key row with another payload (request id reuse) or a
+    // terminally failed row is not this grant's commit.
+    const mode = typeof ctx.payload.mode === 'string' ? ctx.payload.mode : '';
+    const body = mode === 'delete' ? '' : typeof ctx.payload.content === 'string' ? ctx.payload.content : '';
+    const sha = createHash('sha256').update(body).digest('hex');
+    committed =
+      row !== undefined &&
+      row.kind === 'free' &&
+      row.session_id === ctx.session.id &&
+      row.path === ctx.payload.path &&
+      row.mode === mode &&
+      row.content_sha256 === sha &&
+      (row.status === 'queued' || row.status === 'prepared' || row.status === 'applied');
     // eslint-disable-next-line no-catch-all/no-catch-all -- if the ledger cannot be read the grant's fate is unknown; keep the row rather than guess
   } catch (err) {
     log.error('memory-gate: ledger unreadable after replay failures; approval kept for the operator', {

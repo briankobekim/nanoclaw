@@ -43,7 +43,8 @@ function fixture(): Fixture {
   // Entries listProtectedMemoryRoots must skip: a dot-entry and a plain file.
   fs.mkdirSync(path.join(groupsDir, '.hidden', 'memory'), { recursive: true });
   fs.writeFileSync(path.join(groupsDir, 'README.md'), 'not a group\n');
-  // A group without a memory dir yet is not a root.
+  // A group without a memory dir yet is STILL a root: its prospective memory path is protected
+  // so nothing can pre-populate it before the group's first spawn.
   fs.mkdirSync(path.join(groupsDir, 'group-c'));
   const sessDir = path.join(root, 'data', 'v2-sessions', 'agent-1', 'session-1');
   fs.mkdirSync(sessDir, { recursive: true });
@@ -140,10 +141,16 @@ function rwExtra(hostPath: string, containerPath = '/workspace/extra'): VolumeMo
 }
 
 describe('listProtectedMemoryRoots', () => {
-  it('lists the real path of every existing groups/*/memory dir, skipping dot-entries, files and memory-less groups', () => {
+  it('lists the canonical groups/*/memory path of every group dir, existing or not, skipping dot-entries and files', () => {
     const f = fixture();
     const roots = listProtectedMemoryRoots(f.groupsDir);
-    expect(roots.sort()).toEqual([fs.realpathSync(f.memoryA), fs.realpathSync(f.memoryB)].sort());
+    expect(roots.sort()).toEqual(
+      [
+        fs.realpathSync(f.memoryA),
+        fs.realpathSync(f.memoryB),
+        path.join(fs.realpathSync(path.join(f.groupsDir, 'group-c')), 'memory'),
+      ].sort(),
+    );
   });
 
   it('returns nothing for a missing groups dir', () => {

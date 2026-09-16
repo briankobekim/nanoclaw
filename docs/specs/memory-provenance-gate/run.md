@@ -154,3 +154,15 @@ Fresh checks after the correction batch: `pnpm typecheck` clean; `vitest run` on
 | 4 | G16 called the handler directly instead of driving the real delivery loop (medium) | Confirmed. | **Accepted**: `delivery-outage.test.ts` writes one `memory_write` system row into a real session mailbox and runs `deliverSessionMessages` four times: three attempts, `delivered.status = 'failed'`, the permanent-failure log line, never a `held` notice, and no further retry. |
 
 Fresh checks after the batch: `pnpm typecheck` clean; 22 affected files → 163 tests passed; full suite → only the 4 pre-existing updater failures; ESLint 0 errors; build rebuilt. Third implementation review requested on the corrected commit.
+
+### Implementation review, third pass (commits through 79dc2fbc)
+`completed` — exit 0, 386 s, 182,815 tokens; verdict `needs-attention`, 4 findings → `must_fix`. Raw verdict at scratchpad `memgate-impl-review-3/verdict.json`.
+
+| # | Finding | Lead verification | Disposition |
+|---|---|---|---|
+| 1 | Re-hold confirmation could match the clicked (already `approved`) row itself, and a throwing re-hold fell to the generic delete path (high) | Confirmed. | **MUST-FIX, accepted**: confirmation requires a `pending` row other than the clicked one (`excludeApprovalId`); any exception during re-hold becomes `RetainApprovalError`; tests: missing-DM and throwing `requestApproval` through the real response handler keep the row `approved`. |
+| 2 | `listProtectedMemoryRoots` skipped groups whose `memory/` did not exist yet, so a writable mount of a never-spawned group directory could pre-populate its memory (high) | Confirmed. | **MUST-FIX, accepted**: every group directory's prospective canonical `memory` path is protected whether or not it exists; worker test expectation updated; real-composition test for a never-spawned group added. |
+| 3 | After replay failures, ANY same-key ledger row counted as "committed" (request-id reuse with another payload, or `conflict`/`abandoned` rows) (high) | Confirmed. | **MUST-FIX, accepted**: committed only when the row is the identical free op (session, path, mode, content hash) in `queued`/`prepared`/`applied`; test for a same-key row with another payload → both parties told the write was lost. |
+| 4 | G2 did not inject a mailbox failure after the op insert (medium) | Confirmed. | **Accepted**: `writeSessionMessage` is mocked to fail once after the real op insert; the op exists, no mailbox row, the retry delivers once with one block; conflicting reuse leaves no mailbox row. |
+
+Fresh checks after the batch: `pnpm typecheck` clean; 21 affected files → 161 tests passed; full suite → only the 4 pre-existing updater failures; ESLint 0 errors; build rebuilt. Fourth implementation review on the corrected commit.
