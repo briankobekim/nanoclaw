@@ -28,20 +28,23 @@ export const WRAP_COLS = 200;
 const WRAP_MARKER = '⏎';
 const BACKSLASH = 0x5c;
 
-/** Code points written as `\u{HEX}`. Backslash is handled separately (`\\`). */
+/**
+ * Code points written as `\u{HEX}`. Backslash is handled separately (`\\`).
+ * The rule is by Unicode category, not by an enumerated list, so every
+ * control (Cc, except \n and \t), format (Cf: bidi controls, zero-width
+ * characters, soft hyphen, U+061C, ...), surrogate (Cs), private-use (Co),
+ * unassigned (Cn) and line/paragraph separator (Zl, Zp) code point is shown
+ * as a visible escape, plus the backtick, the wrap marker, and anything
+ * outside the BMP.
+ */
+const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
 function escapedAsHex(cp: number): boolean {
+  if (cp === 0x0a || cp === 0x09) return false; // newline and tab stay literal
   if (cp === 0x60) return true; // backtick
-  if (cp < 0x20) return cp !== 0x0a && cp !== 0x09; // C0 except \n and \t
-  if (cp === 0x7f) return true; // DEL
-  if (cp >= 0x200b && cp <= 0x200f) return true; // zero-width, bidi marks
-  if (cp >= 0x202a && cp <= 0x202e) return true; // bidi embedding/override
-  if (cp >= 0x2060 && cp <= 0x2064) return true; // word joiner, invisible operators
-  if (cp >= 0x2066 && cp <= 0x2069) return true; // bidi isolates
-  if (cp === 0xfeff) return true; // BOM / ZWNBSP
   if (cp === 0x23ce) return true; // the wrap marker itself
-  if (cp >= 0xd800 && cp <= 0xdfff) return true; // lone surrogate
   if (cp > 0xffff) return true; // outside the BMP
-  return false;
+  if (cp >= 0xd800 && cp <= 0xdfff) return true; // lone surrogate (refused upstream; escaped here for totality)
+  return INVISIBLE_RE.test(String.fromCodePoint(cp));
 }
 
 function hexEscape(cp: number): string {

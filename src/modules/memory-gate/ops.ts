@@ -10,7 +10,7 @@
  * already equals `after_sha256` → applied; still equals `before_sha256` →
  * mutate; anything else → conflict, never a second write.
  */
-import { createHash, randomBytes } from 'crypto';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -150,11 +150,16 @@ export async function enqueueMemoryOp(input: MemoryOpInput): Promise<'inserted' 
     if (raceError) throw raceError;
     return 'quiesced';
   }
+  // Only the identical op, from the same session, still live or applied, is
+  // this request already on record. A same-key row with another payload, from
+  // another session, or terminally failed is a conflicting reuse of the id.
   const identical =
     existing.kind === input.kind &&
+    existing.session_id === input.sessionId &&
     existing.path === input.path &&
     existing.mode === input.mode &&
-    existing.content_sha256 === contentSha;
+    existing.content_sha256 === contentSha &&
+    (existing.status === 'queued' || existing.status === 'prepared' || existing.status === 'applied');
   if (identical) return 'exists';
   throw new Error(`memory op ${input.agentGroupId}/${input.requestId} already exists with different content`);
 }
@@ -234,6 +239,31 @@ async function pendingOpsFor(groupId: string): Promise<MemoryOpRow[]> {
   );
 }
 
+/** Temp file name for an op: deterministic, so a crash between write and rename leaves nothing anonymous. */
+function tempPathFor(abs: string, op: MemoryOpRow): string {
+  const tag = sha256(`${op.agent_group_id}\n${op.request_id}`).slice(0, 8);
+  return path.join(path.dirname(abs), `${path.basename(abs)}.mg-${tag}.tmp`);
+}
+
+const TEMP_RE = /\.mg-[0-9a-f]{8}\.tmp$/;
+
+/** Remove every memory-gate temp file left in the tree by a crash mid-write (the group lock makes them all stale here). */
+function removeStaleTemps(memoryRoot: string): void {
+  const pending: string[] = [memoryRoot];
+  while (pending.length > 0) {
+    const dir = pending.pop()!;
+    for (const name of fs.readdirSync(dir)) {
+      const entry = path.join(dir, name);
+      const st = fs.lstatSync(entry);
+      if (st.isDirectory()) pending.push(entry);
+      else if (st.isFile() && TEMP_RE.test(name)) {
+        log.warn('memory-gate: removing stale temp file left by an interrupted write', { file: entry });
+        removeQuietly(entry);
+      }
+    }
+  }
+}
+
 async function completeGroup(groupId: string, deps: CompletionDeps): Promise<void> {
   const ops = await pendingOpsFor(groupId);
   if (ops.length === 0) return;
@@ -261,6 +291,8 @@ async function completeGroup(groupId: string, deps: CompletionDeps): Promise<voi
     }
     throw err;
   }
+
+  removeStaleTemps(memoryRoot);
 
   for (const op of ops) {
     try {
@@ -428,7 +460,7 @@ async function completeOne(op: MemoryOpRow, memoryRoot: string, deps: Completion
   }
 
   try {
-    mutate(target.abs, planned);
+    mutate(target.abs, planned, tempPathFor(target.abs, op));
     // eslint-disable-next-line no-catch-all/no-catch-all -- every filesystem failure during the mutation is one failed attempt, retried by the sweep
   } catch (err) {
     await failAttempt(op, attempts, err, deps);
@@ -441,15 +473,15 @@ function assertRealDirectory(dir: string): void {
   if (!fs.lstatSync(dir).isDirectory()) throw new Error(`parent is no longer a real directory: ${dir}`);
 }
 
-/** replace/append: temp file in the same directory, then rename over the target; delete: unlink. */
-function mutate(abs: string, planned: Buffer | null): void {
+/** replace/append: the op's own temp file in the same directory, then rename over the target; delete: unlink. */
+function mutate(abs: string, planned: Buffer | null, tmp: string): void {
   const parent = path.dirname(abs);
   if (planned === null) {
     assertRealDirectory(parent);
     fs.unlinkSync(abs);
     return;
   }
-  const tmp = path.join(parent, `${path.basename(abs)}.${randomBytes(6).toString('hex')}.tmp`);
+  removeQuietlyIfPresent(tmp);
   const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW;
   const fd = fs.openSync(tmp, flags, 0o644);
   try {
@@ -468,6 +500,14 @@ function mutate(abs: string, planned: Buffer | null): void {
   } catch (err) {
     removeQuietly(tmp);
     throw err;
+  }
+}
+
+function removeQuietlyIfPresent(file: string): void {
+  try {
+    fs.unlinkSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 }
 

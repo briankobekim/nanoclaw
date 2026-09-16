@@ -166,3 +166,15 @@ Fresh checks after the batch: `pnpm typecheck` clean; 22 affected files → 163 
 | 4 | G2 did not inject a mailbox failure after the op insert (medium) | Confirmed. | **Accepted**: `writeSessionMessage` is mocked to fail once after the real op insert; the op exists, no mailbox row, the retry delivers once with one block; conflicting reuse leaves no mailbox row. |
 
 Fresh checks after the batch: `pnpm typecheck` clean; 21 affected files → 161 tests passed; full suite → only the 4 pre-existing updater failures; ESLint 0 errors; build rebuilt. Fourth implementation review on the corrected commit.
+
+### Implementation review, fourth pass (commits through e6dbe4ed)
+`completed` — exit 0, 490 s, 192,983 tokens; verdict `needs-attention`, 4 findings (1 high, 3 medium) → `must_fix`. Raw verdict at scratchpad `memgate-impl-review-4/verdict.json`.
+
+| # | Finding | Lead verification | Disposition |
+|---|---|---|---|
+| 1 | The visible encoding enumerated only some invisible code points (U+061C, U+00AD, U+2028 … passed literally); a lone surrogate renders one way and lands as U+FFFD (high) | Confirmed. | **MUST-FIX, accepted**: escaping is now by Unicode category (`\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}` plus backtick, marker, non-BMP); ill-formed strings are refused at shape validation so card, hash and bytes derive from one well-formed UTF-8 sequence; tests added. |
+| 2 | `enqueueMemoryOp` returned `exists` for any same-key row with the same payload, regardless of session or terminal status (medium) | Confirmed. | **MUST-FIX, accepted**: `exists` only for the identical op from the same session in `queued`/`prepared`/`applied`; anything else is a conflicting reuse; test added. |
+| 3 | A crash between temp-file write and rename left an anonymous `*.tmp` in the memory tree that the preflight would accept as a file (medium) | Confirmed. | **MUST-FIX, accepted**: temp names are deterministic per op (`<name>.mg-<sha8>.tmp`), removed before a retry, and every `*.mg-*.tmp` in the tree is swept at the start of a group's completion (all are stale under the group lock); crash-window test added. |
+| 4 | Plan/rollback text said `ncl memory-gate quiesce on|off` but the resource takes `--state` (medium) | Confirmed. | **Accepted**: plan and rollback text aligned to `--state on|off` (the CLI's arg model); no code change. |
+
+Fresh checks: `pnpm typecheck` clean; affected files pass; full suite → only the 4 pre-existing updater failures; ESLint 0 errors; build rebuilt. Fifth implementation review on the corrected commit.

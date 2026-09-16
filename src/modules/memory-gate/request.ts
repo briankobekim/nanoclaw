@@ -93,6 +93,8 @@ export function shapeError(content: Record<string, unknown>): string | null {
     return null;
   }
   if (typeof content.content !== 'string') return 'content is required for replace and append';
+  if (!content.content.isWellFormed())
+    return 'content contains a lone surrogate; only well-formed text can be shown and written';
   if (Buffer.byteLength(encodeVisible(content.content), 'utf8') > CONTENT_MAX_BYTES) {
     return `content exceeds ${CONTENT_MAX_BYTES} bytes in its visible form; split into smaller writes`;
   }

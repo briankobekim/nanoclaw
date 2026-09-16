@@ -101,3 +101,42 @@ describe('completion order and root validation', () => {
     expect(fs.readFileSync(path.join(memoryDir, 'notes.md'), 'utf8')).toBe('must not land outside');
   });
 });
+
+describe('fourth-review corrections', () => {
+  it('a temp file left by a crash mid-write is removed and the op still lands exactly once', async () => {
+    fs.mkdirSync(memoryDir, { recursive: true });
+    const { prepareMemoryRoot } = await import('../../memory-scaffold.js');
+    await prepareMemoryRoot(groupDir);
+    fs.writeFileSync(path.join(memoryDir, 'notes.md'), 'start\n');
+    await enqueue('crashed', 'landed once');
+    // Simulate a crash after the temp file was written but before the rename.
+    const { createHash } = await import('node:crypto');
+    const tag = createHash('sha256').update(`${GROUP}\ncrashed`).digest('hex').slice(0, 8);
+    fs.writeFileSync(path.join(memoryDir, `notes.md.mg-${tag}.tmp`), 'partial');
+    fs.writeFileSync(path.join(memoryDir, 'other.md.mg-deadbeef.tmp'), 'stale');
+    await completePendingOps(deps);
+    expect((await getMemoryOp(GROUP, 'crashed'))?.status).toBe('applied');
+    expect(fs.readFileSync(path.join(memoryDir, 'notes.md'), 'utf8')).toBe('start\nlanded once');
+    expect(fs.readdirSync(memoryDir).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('a same-key row from another session, another payload, or a terminal state is a conflicting reuse', async () => {
+    fs.mkdirSync(memoryDir, { recursive: true });
+    await enqueue('k1', 'one');
+    await expect(
+      enqueueMemoryOp({
+        agentGroupId: GROUP,
+        requestId: 'k1',
+        sessionId: 'sess-other',
+        kind: 'free',
+        path: 'notes.md',
+        mode: 'append',
+        content: 'one',
+      }),
+    ).rejects.toThrow(/different content/);
+    await expect(enqueue('k1', 'two')).rejects.toThrow(/different content/);
+    const { getDb } = await import('../../db/connection.js');
+    await getDb().run("UPDATE memory_write_ops SET status = 'abandoned' WHERE request_id = 'k1'");
+    await expect(enqueue('k1', 'one')).rejects.toThrow(/different content/);
+  });
+});

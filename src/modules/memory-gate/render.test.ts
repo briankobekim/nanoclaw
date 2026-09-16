@@ -143,3 +143,19 @@ describe('memory-gate render', () => {
     expect(maxRendered - CONTENT_MAX_BYTES).toBeLessThan(700);
   });
 });
+
+describe('fourth-review correction: every invisible code point is escaped', () => {
+  it('escapes Cf/Cc/Zl/Zp characters beyond the original list and refuses lone surrogates upstream', async () => {
+    const { encodeVisible, decodeVisible } = await import('./render.js');
+    const samples = ['\u061C', '\u00AD', '\u2028', '\u2029', '\u200E', '\u180E', '\u0085', '\uFFF9'];
+    for (const s of samples) {
+      const encoded = encodeVisible(`a${s}b`);
+      expect(encoded).toMatch(/^a\\u\{[0-9A-F]+\}b$/);
+      expect(decodeVisible(encoded)).toBe(`a${s}b`);
+    }
+    const { shapeError } = await import('./request.js');
+    expect(shapeError({ request_id: 'r', path: 'x.md', mode: 'append', content: 'bad \uD800 text' })).toMatch(
+      /lone surrogate/,
+    );
+  });
+});
