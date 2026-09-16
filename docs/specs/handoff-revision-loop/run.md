@@ -62,3 +62,33 @@ Build log (appended as work proceeds):
   - `grep MODULE-HOOK:handoff-stall-ping src/host-sweep.ts` → lines 159 and 166.
 - Plan fidelity: every §5 case exists under its planned name and asserts what the plan says; no scope added beyond §2. Verifier untouched (`git status` shows nothing under `src/modules/verifier/`).
 - Gate: build coherent, focused checks pass, diff inspected, deviations explicit → ready for `/team-review --implementation`.
+
+## Stage: /team-review --implementation (2026-09-15, primary runtime Claude, model claude-fable-5-1)
+
+Target: approved plan revision 2 + raw diff of commit f7c5300d (all tracked files, 108 KB) + the gitignored persona edits as a unified diff against the backups. Lenses: correctness, simplicity, plan fidelity, failure handling, verification quality, plus security (ledger trust boundary) and state/rollback (live migration, transaction atomicity).
+
+### Cross-model review
+- Reviewer: Codex CLI 0.151.0, requested `gpt-5.6-sol`, `model_reasoning_effort="high"`, `--ignore-user-config --ephemeral --yolo`, schema-enforced output, vendored adversarial prompt; cwd = repo root; foreground, Bash timeout 3600000 ms.
+- Result: `completed` — exit 0, 306 s, 139,250 tokens; JSON valid against the schema; verdict `needs-attention`, 6 findings → recorded as `must_fix`. Working tree confirmed unchanged by the reviewer. Raw verdict at scratchpad `impl-review/verdict.json`.
+
+| # | Codex finding (severity, confidence) | Lead verification against source | Disposition |
+|---|---|---|---|
+| 1 | Transitions compare only stored vs supplied fingerprint; a `supersedes` edited after delivery still reviews/acknowledges/closes (high, 0.99) | Confirmed: `transition()` and `reviewHandoff` used `expectFingerprint` only; `fingerprintOfRow` was re-derived by enforcement, `deliverHandoffWithInputs`, and the verifier, not by later transitions. Plan §4.1 named those three checks and did not promise transitions, so no stated invariant was violated — but the ledger's integrity model is only coherent if every state change refuses a self-inconsistent row. All 8 live rows verified to pass the self-check on the migrated copy before adopting it. | **SHOULD-FIX, accepted**: `expectSelfIntegrity()` in `transition()` and `reviewHandoff`; A11 added. |
+| 2 | An unrelated row pointed at a stalled prior (direct SQL) silences its ping; missions makes the same inference (high, 0.98) | Confirmed: `openUnsupersededRows` and `missions.ts` honored any non-null `supersedes`. Plan §1 forbids a silent miss. | **SHOULD-FIX, accepted** (tampering scenario, cheap fix): `trustedSupersededIds()` in `ledger.ts` honors a successor only when its own fingerprint matches; used by both consumers; warning names corrupted successors. E11, D4 added. |
+| 3 | An unsettled `adapter.deliver` promise wedges the host sweep loop, which reschedules only after the hook returns (high, 0.97) | Confirmed against `host-sweep.ts:157-167` (`setTimeout` after the awaited hook) and `stall-ping.ts` (bare `await adapter.deliver`). Violates plan §4.2 "a Slack failure never stops session maintenance". | **MUST-FIX, accepted**: `withTimeout()` bounds each send at `DELIVER_TIMEOUT_MS` (30 s); timeout = failed send (warned, unrecorded, retried). E12 added with an injected 20 ms timeout. |
+| 4 | Malformed `owner_pinged` JSON throws inside `alreadyPinged` and aborts the whole sweep every tick (medium, 0.98) | Confirmed: unguarded `JSON.parse`. Events are host-written, but one bad row would block all other stalls forever. | **SHOULD-FIX, accepted**: per-event try/catch, warned with event id, never a dedupe hit. E13 added. |
+| 5 | Parser keeps the first `SUPERSEDES` line; a later conflicting line reaches Echo (medium, 0.96) | Confirmed as parser behavior (`slack-enforcement.ts:127`, first occurrence wins) — for every field, not only `SUPERSEDES`; predates this change. The ledger column is authoritative and Echo is instructed to read the prior from the ledger, so state cannot be affected; the residual is prose ambiguity in the forwarded message. A SUPERSEDES-only rule would be inconsistent, and a parser-wide duplicate rejection could drop legitimate live messages that repeat a label in prose. | **Rejected for this batch; recorded as follow-up** "reject conflicting duplicate contract fields" for a separate, small change with its own live-message survey. |
+| 6 | A2 asserts less than the plan says (low, 1.0) | Confirmed by reading the test. | **Accepted**: A2 now mirrors A1 (status, prior `updated_at`, both event payloads). |
+
+### Correction batch (one, bounded)
+Files: `ledger.ts` (+`expectSelfIntegrity`, +`trustedSupersededIds`), `stall-ping.ts` (+timeout, corrupted-link warning, per-event parse isolation), `missions.ts` (uses `trustedSupersededIds`), `ledger.test.ts` (A2 strengthened, A11), `stall-ping.test.ts` (E11–E13), `missions.test.ts` (D4), `plan.md` (§4.1/§4.2 notes, §5 cases A11, D4, E11–E13). No product intent, scope, or approved threshold changed; the corrections tighten invariants the plan already stated.
+
+### Fresh checks after the correction
+- `pnpm typecheck` → clean.
+- `vitest run src/modules/handoff-ledger src/cli/resources/missions.test.ts src/cli/resources/handoffs.test.ts src/modules/verifier/run-checks.test.ts src/modules/verifier/persistence.test.ts` → 9 files, 137 tests passed.
+- Verbose run confirms the new cases by name: A2 (strengthened), A11, D3, D4, E11, E12, E13 all ✓.
+- `prettier --write` on the six changed files; ESLint 0 errors (2 `no-catch-all` warnings in `stall-ping.ts`, the plan-mandated log-and-continue catches).
+- Live-state preflight: `docker ps` shows no agent containers (persona edits apply at next spawn); host PID 7457; open handoffs and ages at 20:05 local: RECOVERY-20260909-ATLAS-ECHO 144.4 h `created`, handoff-1789406994832-675d2d37 30.6 h `created`, handoff-1789407737214-fe7ae416 30.4 h `delivered`, handoff-1789503177574-b2315abc 1.3 h `changes_required` → the first sweep after restart will ping the first three; the fourth only once it passes 6 h unrevised.
+
+### Verdict
+`clear` after one correction batch: no verified MUST-FIX remains; other-family coverage completed (not degraded). Known residuals: at-least-once pings (plan §9); duplicate-field prose ambiguity (follow-up above).

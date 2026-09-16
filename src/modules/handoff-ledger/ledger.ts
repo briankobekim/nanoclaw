@@ -189,6 +189,17 @@ function expectStatus(row: HandoffRow, expected: HandoffStatus): void {
   }
 }
 
+/**
+ * A row whose stored fingerprint no longer matches its own fields has been
+ * edited outside the ledger (a contract field or the `supersedes` link). No
+ * transition may build on it.
+ */
+function expectSelfIntegrity(row: HandoffRow): void {
+  if (fingerprintOfRow(row) !== row.fingerprint) {
+    throw new Error(`handoff ${row.id} ledger fingerprint does not match its own fields`);
+  }
+}
+
 export async function createHandoff(input: CreateHandoffInput): Promise<HandoffRow> {
   const id = handoffId(input.id);
   const project = required('project', input.project);
@@ -321,6 +332,24 @@ export function fingerprintOfRow(row: HandoffRow): string {
 }
 
 /**
+ * Ids of handoffs that have a trustworthy successor. A successor whose stored
+ * fingerprint no longer matches its own fields (for example a `supersedes`
+ * value edited after insert) is not honored: a corrupted link must never hide
+ * the prior from the stall sweep or the mission view. The corrupted rows are
+ * returned so callers can say so.
+ */
+export function trustedSupersededIds(rows: HandoffRow[]): { superseded: Set<string>; corrupted: HandoffRow[] } {
+  const superseded = new Set<string>();
+  const corrupted: HandoffRow[] = [];
+  for (const row of rows) {
+    if (!row.supersedes) continue;
+    if (fingerprintOfRow(row) === row.fingerprint) superseded.add(row.supersedes);
+    else corrupted.push(row);
+  }
+  return { superseded, corrupted };
+}
+
+/**
  * Bind the verification inputs to the ledger fingerprint they were captured
  * against. Editing either the handoff row or the inputs row breaks this hash,
  * which is what the host verifier re-derives before it starts a container.
@@ -424,6 +453,7 @@ export async function reviewHandoff(
   notes = '',
 ): Promise<HandoffRow> {
   const row = await mustGetHandoff(id);
+  expectSelfIntegrity(row);
   expectActor(actor, row.reviewer_agent_group_id, 'reviewer');
   expectFingerprint(row, fingerprint);
   expectStatus(row, 'delivered');
@@ -482,6 +512,7 @@ async function transition(
   options: { closureEvidence?: string } = {},
 ): Promise<HandoffRow> {
   const row = await mustGetHandoff(id);
+  expectSelfIntegrity(row);
   expectActor(actor, row.source_agent_group_id, 'source');
   expectFingerprint(row, fingerprint);
   expectStatus(row, from);

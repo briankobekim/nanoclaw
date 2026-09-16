@@ -21,6 +21,7 @@ import {
   listHandoffEvents,
   OWNER_PINGED_EVENT,
   recordOwnerPing,
+  trustedSupersededIds,
   type HandoffRow,
   type HandoffStatus,
 } from './ledger.js';
@@ -31,12 +32,16 @@ export const STALL_MS_BLOCKED = 60 * 60 * 1000;
 export const STALL_MS_OPEN = 6 * 60 * 60 * 1000;
 
 const HOUR_MS = 60 * 60 * 1000;
+/** A Slack call that has not settled by then is treated as failed and retried next tick. */
+export const DELIVER_TIMEOUT_MS = 30_000;
 
 export interface StallPingDeps {
   getOwners: () => Promise<Array<{ user_id: string }>>;
   ensureUserDm: (userId: string) => Promise<Pick<MessagingGroup, 'channel_type' | 'platform_id' | 'instance'> | null>;
   getDeliveryAdapter: () => Pick<ChannelDeliveryAdapter, 'deliver'> | null;
   recordOwnerPing: typeof recordOwnerPing;
+  /** Test hook; production uses DELIVER_TIMEOUT_MS. */
+  deliverTimeoutMs?: number;
 }
 
 const liveDeps: StallPingDeps = { getOwners, ensureUserDm, getDeliveryAdapter, recordOwnerPing };
@@ -68,18 +73,47 @@ export function stallMessage(row: HandoffRow, ageMs: number): string {
   ].join('\n');
 }
 
-/** Open rows with no successor: the only rows a ping can be about. */
+/**
+ * Open rows with no trustworthy successor: the only rows a ping can be about.
+ * A successor whose fingerprint no longer matches its fields is a corrupted
+ * link and must not hide the prior (that would be a silent missed ping).
+ */
 async function openUnsupersededRows(): Promise<HandoffRow[]> {
   const rows = await listAllHandoffs();
-  const superseded = new Set(rows.map((row) => row.supersedes).filter((id): id is string => id !== null));
+  const { superseded, corrupted } = trustedSupersededIds(rows);
+  if (corrupted.length > 0) {
+    log.warn('Handoff stall sweep: ignoring successor links whose fingerprint does not match their fields', {
+      successors: corrupted.map((row) => row.id),
+    });
+  }
   return rows.filter((row) => row.status !== 'closed' && !superseded.has(row.id));
+}
+
+/** Bound a promise; the underlying call may still finish later, which the at-least-once contract tolerates. */
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function alreadyPinged(row: HandoffRow, recipient: string): Promise<boolean> {
   const events = await listHandoffEvents(row.id);
   return events.some((event) => {
     if (event.event_type !== OWNER_PINGED_EVENT) return false;
-    const payload = JSON.parse(event.payload_json) as Record<string, unknown>;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(event.payload_json) as Record<string, unknown>;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- a malformed audit row is data; it must neither stop the sweep nor count as a ping
+    } catch (err) {
+      log.warn('Handoff stall sweep: malformed owner_pinged payload ignored', {
+        handoffId: row.id,
+        eventId: event.id,
+        err,
+      });
+      return false;
+    }
     return payload.status === row.status && payload.updated_at === row.updated_at && payload.recipient === recipient;
   });
 }
@@ -121,14 +155,18 @@ export async function sweepStalledHandoffs(now = Date.now(), deps: StallPingDeps
 
       let platformMessageId: string | undefined;
       try {
-        platformMessageId = await adapter.deliver(
-          mg.channel_type,
-          mg.platform_id,
-          null,
-          'chat-sdk',
-          JSON.stringify({ text: stallMessage(row, now - Date.parse(row.updated_at)) }),
-          undefined,
-          mg.instance,
+        platformMessageId = await withTimeout(
+          adapter.deliver(
+            mg.channel_type,
+            mg.platform_id,
+            null,
+            'chat-sdk',
+            JSON.stringify({ text: stallMessage(row, now - Date.parse(row.updated_at)) }),
+            undefined,
+            mg.instance,
+          ),
+          deps.deliverTimeoutMs ?? DELIVER_TIMEOUT_MS,
+          `stall ping to ${mg.platform_id}`,
         );
       } catch (err) {
         log.warn('Handoff stall ping failed; will retry next sweep', {

@@ -363,3 +363,71 @@ describe('sweepStalledHandoffs', () => {
     expect(await pingEvents(row.id)).toHaveLength(2);
   });
 });
+
+describe('stall ping hardening (implementation review corrections, 2026-09-15)', () => {
+  it('a corrupted successor link does not silence the prior', async () => {
+    const stalled = await handoffIn('H-E11', 'delivered');
+    await age(stalled.id, 7 * HOUR);
+    const decoy = await newHandoff('H-E11-decoy');
+    await getDb().run('UPDATE handoffs SET supersedes = ? WHERE id = ?', stalled.id, decoy.id);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const { deps, deliver } = makeDeps();
+
+    await sweepStalledHandoffs(NOW, deps);
+    expect(deliver.mock.calls.map(textOf).filter((text) => text.includes('H-E11 ('))).toHaveLength(1);
+    expect(await pingEvents(stalled.id)).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('fingerprint'),
+      expect.objectContaining({ successors: ['H-E11-decoy'] }),
+    );
+  });
+
+  it('a delivery that never settles is treated as a failure and retried', async () => {
+    const row = await handoffIn('H-E12', 'delivered');
+    await age(row.id, 7 * HOUR);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const { deps, deliver } = makeDeps({ deliverTimeoutMs: 20 });
+    deliver.mockImplementationOnce(() => new Promise<string>(() => {}));
+
+    await sweepStalledHandoffs(NOW, deps);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(await pingEvents(row.id)).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ handoffId: row.id }));
+
+    await sweepStalledHandoffs(NOW, deps);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(await pingEvents(row.id)).toHaveLength(1);
+  });
+
+  it('a malformed owner_pinged event neither blocks the sweep nor counts as a ping', async () => {
+    const a = await handoffIn('H-E13-A', 'delivered');
+    await age(a.id, 7 * HOUR);
+    const b = await handoffIn('H-E13-B', 'delivered');
+    await age(b.id, 7 * HOUR);
+    await getDb().run(
+      `INSERT INTO handoff_events (id, handoff_id, sequence, event_type, actor_agent_group_id, payload_json, created_at)
+       VALUES ('bad-evt', ?, 99, ?, 'host:ping', '{not json', ?)`,
+      a.id,
+      OWNER_PINGED_EVENT,
+      new Date(NOW).toISOString(),
+    );
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const { deps, deliver } = makeDeps();
+
+    await sweepStalledHandoffs(NOW, deps);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    const recorded = await getDb().get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM handoff_events WHERE handoff_id = ? AND event_type = ? AND id <> 'bad-evt'",
+      a.id,
+      OWNER_PINGED_EVENT,
+    );
+    expect(recorded!.n).toBe(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('malformed'),
+      expect.objectContaining({ eventId: 'bad-evt' }),
+    );
+
+    await sweepStalledHandoffs(NOW, deps);
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+});

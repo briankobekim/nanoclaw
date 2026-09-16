@@ -4,6 +4,7 @@ import type { TaskRecord } from '../../mailbox/index.js';
 import {
   listAllHandoffs,
   listHandoffsForAgent,
+  trustedSupersededIds,
   type HandoffRow,
   type HandoffStatus,
 } from '../../modules/handoff-ledger/index.js';
@@ -231,7 +232,7 @@ async function listMissions(args: Record<string, unknown>, ctx: CallerContext): 
           )
         : await listAllHandoffs();
   const cutoff = Date.now() - recentDays * 24 * 60 * 60 * 1000;
-  const supersededIds = new Set(handoffs.map((row) => row.supersedes).filter((value): value is string => !!value));
+  const supersededIds = trustedSupersededIds(handoffs).superseded;
   const handoffRows: HandoffMission[] = handoffs.map((row) => {
     const superseded = supersededIds.has(row.id);
     return {

@@ -157,13 +157,19 @@ describe('handoff revisions', () => {
     const prior = await revisable('REV-A2', 'REVIEW BLOCKED');
     const revision = await createHandoff(revisionInput(prior));
     expect(revision.supersedes).toBe(prior.id);
-    expect((await getHandoff(prior.id))!.status).toBe('review_blocked');
-    expect((await listHandoffEvents(prior.id)).map((e) => e.event_type)).toEqual([
-      'created',
-      'delivered',
-      'review_blocked',
-      'superseded',
-    ]);
+    expect(revision.status).toBe('created');
+    const priorAfter = (await getHandoff(prior.id))!;
+    expect(priorAfter.status).toBe('review_blocked');
+    expect(priorAfter.updated_at).toBe(prior.updated_at);
+    const priorEvents = await listHandoffEvents(prior.id);
+    expect(priorEvents.map((e) => e.event_type)).toEqual(['created', 'delivered', 'review_blocked', 'superseded']);
+    expect(JSON.parse(priorEvents[priorEvents.length - 1]!.payload_json)).toMatchObject({
+      successor: revision.id,
+      fingerprint: prior.fingerprint,
+    });
+    const createdEvent = (await listHandoffEvents(revision.id))[0]!;
+    expect(createdEvent.event_type).toBe('created');
+    expect(JSON.parse(createdEvent.payload_json)).toMatchObject({ supersedes: prior.id });
   });
 
   it('createHandoff with supersedes rejects a prior that is not changes_required or review_blocked', async () => {
@@ -312,5 +318,34 @@ describe('handoff revisions', () => {
     );
     expect(await getHandoff(`${prior.id}-r2`)).toBeUndefined();
     expect((await listHandoffEvents(prior.id)).some((e) => e.event_type === 'superseded')).toBe(false);
+  });
+});
+
+describe('ledger self-integrity on transitions', () => {
+  it('a tampered supersedes link is refused by every later transition', async () => {
+    const prior = await revisable('REV-A11');
+    const revision = await createHandoff(revisionInput(prior));
+    await markHandoffDelivered(revision.id, ATLAS, revision.fingerprint);
+
+    await getDb().run('UPDATE handoffs SET supersedes = NULL WHERE id = ?', revision.id);
+    await expect(reviewHandoff(revision.id, ECHO, revision.fingerprint, 'APPROVED')).rejects.toThrow(
+      /ledger fingerprint does not match its own fields/,
+    );
+    expect((await getHandoff(revision.id))!.status).toBe('delivered');
+
+    await getDb().run('UPDATE handoffs SET supersedes = ? WHERE id = ?', prior.id, revision.id);
+    await reviewHandoff(revision.id, ECHO, revision.fingerprint, 'APPROVED');
+    await getDb().run('UPDATE handoffs SET supersedes = NULL WHERE id = ?', revision.id);
+    await expect(acknowledgeHandoff(revision.id, ATLAS, revision.fingerprint)).rejects.toThrow(
+      /ledger fingerprint does not match its own fields/,
+    );
+
+    await getDb().run('UPDATE handoffs SET supersedes = ? WHERE id = ?', prior.id, revision.id);
+    await acknowledgeHandoff(revision.id, ATLAS, revision.fingerprint);
+    await getDb().run("UPDATE handoffs SET goal = 'tampered' WHERE id = ?", revision.id);
+    await expect(closeHandoff(revision.id, ATLAS, revision.fingerprint, 'done')).rejects.toThrow(
+      /ledger fingerprint does not match its own fields/,
+    );
+    expect((await getHandoff(revision.id))!.status).toBe('acknowledged');
   });
 });

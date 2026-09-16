@@ -414,4 +414,16 @@ describe('handoff revisions in the mission view', () => {
     expect(task).toMatchObject({ revises: '' });
     expect(rows.every((row) => typeof row.revises === 'string')).toBe(true);
   });
+
+  it('a corrupted successor link does not hide the prior', async () => {
+    await reviewed('MISSION-CORRUPT-1', 'CHANGES REQUIRED');
+    await createHandoff('MISSION-CORRUPT-DECOY');
+    // Point an unrelated row at the prior by direct SQL: the decoy's fingerprint
+    // no longer matches its fields, so the link must not be honored.
+    await getDb().run('UPDATE handoffs SET supersedes = ? WHERE id = ?', 'MISSION-CORRUPT-1', 'MISSION-CORRUPT-DECOY');
+    const rows = await missions();
+    const prior = rows.find((row) => row.mission_id === 'MISSION-CORRUPT-1')!;
+    expect(prior).toMatchObject({ stage: 'changes_requested' });
+    expect(prior.next_action).toContain('--supersedes MISSION-CORRUPT-1');
+  });
 });
